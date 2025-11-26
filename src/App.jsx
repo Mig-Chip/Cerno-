@@ -260,9 +260,9 @@ const Building3D = ({ floors, anomalies, onSelectFloor, selectedFloor, maintenan
     const buildingGroup = new THREE.Group();
     scene.add(buildingGroup);
 
-    const floorH = 0.8, towerW = 5, towerD = 4;
-    const resW = 3.5, resD = 3.5, resFloors = 17, resX = -7;
-    const podiumW = 10, podiumD = 5, podiumH = 4.8;
+    const floorH = 0.8, towerW = 7, towerD = 5.5;
+    const resW = 4, resD = 4.5, resFloors = 17, resX = -8;
+    const podiumW = 14, podiumD = 7, podiumH = 2.5;
 
     const sortedFloors = [...floors].sort((a, b) => a.level - b.level);
     floorMeshesRef.current = [];
@@ -273,220 +273,86 @@ const Building3D = ({ floors, anomalies, onSelectFloor, selectedFloor, maintenan
       const canvas = document.createElement('canvas');
       canvas.width = 64; canvas.height = 32;
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#8899aa';
-      ctx.font = 'bold 16px monospace';
+      ctx.fillStyle = '#2dd4bf';
+      ctx.font = 'bold 20px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(text, 32, 22);
       const texture = new THREE.CanvasTexture(canvas);
-      const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.7 });
+      const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.8 });
       const sprite = new THREE.Sprite(mat);
       sprite.position.copy(position);
-      sprite.scale.set(1.8, 0.9, 1);
+      sprite.scale.set(2, 1, 1);
       return sprite;
     };
 
-    // Architectural line material (white/light gray)
-    const archLineMat = new THREE.LineBasicMaterial({ color: 0xaabbcc, transparent: true, opacity: 0.8 });
-    const archLineMatLight = new THREE.LineBasicMaterial({ color: 0x667788, transparent: true, opacity: 0.4 });
-    const archLineMatFaint = new THREE.LineBasicMaterial({ color: 0x445566, transparent: true, opacity: 0.25 });
-
-    // === MAIN TOWER (Architectural Blueprint Style) ===
-    const totalFloors = 40;
-    const towerHeight = totalFloors * floorH;
-    const towerX = 0;
-
-    // Tower outer shell (transparent with edge lines)
-    const towerGeo = new THREE.BoxGeometry(towerW, towerHeight, towerD);
-    const towerMat = new THREE.MeshBasicMaterial({ color: 0x1a2535, transparent: true, opacity: 0.15 });
-    const towerShell = new THREE.Mesh(towerGeo, towerMat);
-    towerShell.position.set(towerX, towerHeight / 2, 0);
-    buildingGroup.add(towerShell);
-
-    // Tower outer edges
-    const towerEdges = new THREE.EdgesGeometry(towerGeo);
-    const towerWire = new THREE.LineSegments(towerEdges, archLineMat);
-    towerWire.position.copy(towerShell.position);
-    buildingGroup.add(towerWire);
-
-    // Draw horizontal floor lines (architectural style)
-    for (let i = 0; i <= totalFloors; i++) {
-      const y = i * floorH;
-      const isTech = [5, 20, 39].includes(i);
-      const lineMat = isTech ? archLineMat : (i % 5 === 0 ? archLineMatLight : archLineMatFaint);
-
-      // Front face floor line
-      const frontPts = [
-        new THREE.Vector3(towerX - towerW/2, y, towerD/2),
-        new THREE.Vector3(towerX + towerW/2, y, towerD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(frontPts), lineMat));
-
-      // Left face floor line
-      const leftPts = [
-        new THREE.Vector3(towerX - towerW/2, y, -towerD/2),
-        new THREE.Vector3(towerX - towerW/2, y, towerD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(leftPts), lineMat));
-    }
-
-    // Vertical structural lines on tower front
-    const verticalPositions = [-towerW/2 + 0.8, -towerW/2 + 2.2, towerW/2 - 2.2, towerW/2 - 0.8];
-    verticalPositions.forEach(x => {
-      const pts = [
-        new THREE.Vector3(towerX + x, 0, towerD/2 + 0.01),
-        new THREE.Vector3(towerX + x, towerHeight, towerD/2 + 0.01)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), archLineMatFaint));
-    });
-
-    // Create clickable floor meshes (invisible but interactive)
     sortedFloors.forEach(floor => {
       if (floor.level < 0) return;
       const y = floor.level * floorH;
-      const h = floorH * 0.95;
-      const isTechFloor = floor.type === FloorType.TECHNICAL;
+      let w = towerW, d = towerD, h = floorH * 0.9;
+      if (floor.level === 0) { h = floorH * 2; w += 0.5; d += 0.5; }
+      if (floor.type === FloorType.TECHNICAL) h = floorH * 1.1;
 
-      // Thin plane for each floor (clickable area)
-      const geo = new THREE.BoxGeometry(towerW - 0.1, h, towerD - 0.1);
-      const mat = new THREE.MeshBasicMaterial({
-        color: isTechFloor ? 0x1a1a2e : 0x1a2a3a,
-        transparent: true,
-        opacity: 0.01 // Nearly invisible by default
-      });
+      const geo = new THREE.BoxGeometry(w, h, d);
+      const isTechFloor = floor.type === FloorType.TECHNICAL;
+      const mat = new THREE.MeshBasicMaterial({ color: isTechFloor ? 0x1a1a2e : 0x1a2a3a, transparent: true, opacity: isTechFloor ? 0.7 : 0.6 });
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(towerX, y + h/2, 0);
+      mesh.position.set(0, y + h/2, 0);
       mesh.userData = { floorId: floor.id, floor, baseY: y + h/2, isTech: isTechFloor };
       buildingGroup.add(mesh);
       floorMeshesRef.current.push(mesh);
 
-      // Wireframe for status indication
       const edges = new THREE.EdgesGeometry(geo);
-      const lineMat = new THREE.LineBasicMaterial({
-        color: isTechFloor ? 0xf59e0b : 0x2dd4bf,
-        transparent: true,
-        opacity: 0 // Hidden by default
-      });
+      const lineMat = new THREE.LineBasicMaterial({ color: isTechFloor ? 0xf59e0b : 0x2dd4bf, transparent: true, opacity: isTechFloor ? 0.9 : 0.7 });
       const wire = new THREE.LineSegments(edges, lineMat);
       wire.position.copy(mesh.position);
       buildingGroup.add(wire);
       mesh.userData.wire = wire;
 
-      // Add floor labels
-      if (floor.level % 10 === 0 || floor.level === 40 || isTechFloor) {
-        const label = createLabel(isTechFloor ? `${floor.id}` : floor.id, new THREE.Vector3(towerX + towerW/2 + 1.5, y + h/2, 0));
+      // Add floor number labels every 5 floors + special floors
+      if (floor.level % 5 === 0 || floor.level === 0 || floor.level === 40 || isTechFloor) {
+        const label = createLabel(isTechFloor ? `${floor.id} ⚙` : floor.id, new THREE.Vector3(towerW/2 + 1.5, y + h/2, 0));
         buildingGroup.add(label);
         labelsRef.current.push(label);
       }
     });
 
-    // === PODIUM (6 floors architectural style) ===
-    const podiumFloors = 6;
-    const podiumX = -4;
-    const podiumFloorH = podiumH / podiumFloors;
-
-    // Podium outer shell
-    const podiumGeo = new THREE.BoxGeometry(podiumW, podiumH, podiumD);
-    const podiumMat = new THREE.MeshBasicMaterial({ color: 0x1a2535, transparent: true, opacity: 0.12 });
-    const podiumShell = new THREE.Mesh(podiumGeo, podiumMat);
-    podiumShell.position.set(podiumX, podiumH / 2, 0);
-    buildingGroup.add(podiumShell);
-
-    // Podium edges
-    const podiumEdges = new THREE.EdgesGeometry(podiumGeo);
-    buildingGroup.add(new THREE.LineSegments(podiumEdges, archLineMat).translateX(podiumX).translateY(podiumH / 2));
-
-    // Podium floor lines
-    for (let i = 0; i <= podiumFloors; i++) {
-      const y = i * podiumFloorH;
-      const pts = [
-        new THREE.Vector3(podiumX - podiumW/2, y, podiumD/2),
-        new THREE.Vector3(podiumX + podiumW/2, y, podiumD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), archLineMatLight));
-
-      const leftPts = [
-        new THREE.Vector3(podiumX - podiumW/2, y, -podiumD/2),
-        new THREE.Vector3(podiumX - podiumW/2, y, podiumD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(leftPts), archLineMatLight));
-    }
-
-    // Podium internal vertical divisions
-    for (let i = 1; i < 6; i++) {
-      const x = podiumX - podiumW/2 + (i * podiumW / 6);
-      const pts = [
-        new THREE.Vector3(x, 0, podiumD/2 + 0.01),
-        new THREE.Vector3(x, podiumH, podiumD/2 + 0.01)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), archLineMatFaint));
-    }
-
-    // === RESIDENTIAL TOWER (Wohnturm) ===
-    const resHeight = resFloors * floorH;
-
-    // Residential tower shell
-    const resGeo = new THREE.BoxGeometry(resW, resHeight, resD);
-    const resMat = new THREE.MeshBasicMaterial({ color: 0x152030, transparent: true, opacity: 0.12 });
-    const resShell = new THREE.Mesh(resGeo, resMat);
-    resShell.position.set(resX, resHeight/2, 0);
-    buildingGroup.add(resShell);
-    buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(resGeo), archLineMat).translateX(resX).translateY(resHeight/2));
-
-    // Residential floor lines
-    for (let i = 0; i <= resFloors; i++) {
-      const y = i * floorH;
-      const pts = [
-        new THREE.Vector3(resX - resW/2, y, resD/2),
-        new THREE.Vector3(resX + resW/2, y, resD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), i % 5 === 0 ? archLineMatLight : archLineMatFaint));
-
-      const leftPts = [
-        new THREE.Vector3(resX - resW/2, y, -resD/2),
-        new THREE.Vector3(resX - resW/2, y, resD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(leftPts), i % 5 === 0 ? archLineMatLight : archLineMatFaint));
-    }
-
-    // Residential vertical divisions
-    const resVertPos = [-resW/2 + 0.8, 0, resW/2 - 0.8];
-    resVertPos.forEach(x => {
-      const pts = [
-        new THREE.Vector3(resX + x, 0, resD/2 + 0.01),
-        new THREE.Vector3(resX + x, resHeight, resD/2 + 0.01)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), archLineMatFaint));
-    });
-
-    // === UNDERGROUND ===
+    // Underground
     sortedFloors.filter(f => f.level < 0).forEach(floor => {
       const y = floor.level * floorH * 0.7;
-      const geo = new THREE.BoxGeometry(towerW + 5, floorH * 0.6, towerD + 5);
-      const mat = new THREE.MeshBasicMaterial({ color: 0x0a1520, transparent: true, opacity: 0.1 });
+      const geo = new THREE.BoxGeometry(towerW + 3, floorH * 0.6, towerD + 3);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x0a1520, transparent: true, opacity: 0.5 });
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(-1, y, 0);
+      mesh.position.set(-1.5, y, 0);
       mesh.userData = { floorId: floor.id, floor, baseY: y };
       buildingGroup.add(mesh);
       floorMeshesRef.current.push(mesh);
       const edges = new THREE.EdgesGeometry(geo);
-      const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x445566, opacity: 0.4, transparent: true }));
+      const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x1a4a5a, opacity: 0.5, transparent: true }));
       wire.position.copy(mesh.position);
       buildingGroup.add(wire);
       mesh.userData.wire = wire;
     });
 
-    // === ANNOTATION LINES (Lichte Raumhöhe / Geschosshöhe style) ===
-    const annoX = towerX + towerW/2 + 6;
-    // Measurement line for typical floor height
-    const annoY1 = 20 * floorH;
-    const annoY2 = 21 * floorH;
-    const annoPts = [
-      new THREE.Vector3(annoX - 0.5, annoY1, 0),
-      new THREE.Vector3(annoX, annoY1, 0),
-      new THREE.Vector3(annoX, annoY2, 0),
-      new THREE.Vector3(annoX - 0.5, annoY2, 0)
-    ];
-    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(annoPts), archLineMatLight));
+    // Wohnturm
+    const resHeight = resFloors * floorH;
+    const resGeo = new THREE.BoxGeometry(resW, resHeight, resD);
+    const resMesh = new THREE.Mesh(resGeo, new THREE.MeshBasicMaterial({ color: 0x152030, transparent: true, opacity: 0.5 }));
+    resMesh.position.set(resX, resHeight/2, 0);
+    buildingGroup.add(resMesh);
+    buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(resGeo), new THREE.LineBasicMaterial({ color: 0x1a6a7a, opacity: 0.6, transparent: true })).translateX(resX).translateY(resHeight/2));
+
+    for (let i = 1; i < resFloors; i++) {
+      const lineY = i * floorH;
+      const pts = [new THREE.Vector3(resX - resW/2, lineY, -resD/2), new THREE.Vector3(resX + resW/2, lineY, -resD/2), new THREE.Vector3(resX + resW/2, lineY, resD/2), new THREE.Vector3(resX - resW/2, lineY, resD/2), new THREE.Vector3(resX - resW/2, lineY, -resD/2)];
+      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x1a5060, opacity: 0.3, transparent: true })));
+    }
+
+    // Podium
+    const podiumGeo = new THREE.BoxGeometry(podiumW, podiumH, podiumD);
+    const podium = new THREE.Mesh(podiumGeo, new THREE.MeshBasicMaterial({ color: 0x1a2535, transparent: true, opacity: 0.4 }));
+    podium.position.set(-4, podiumH/2, 0);
+    buildingGroup.add(podium);
+    buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(podiumGeo), new THREE.LineBasicMaterial({ color: 0x2a7a8a, opacity: 0.5, transparent: true })).translateX(-4).translateY(podiumH/2));
 
     // === PARK (Wireframe Style) - FRONT SIDE ===
     const parkZ = -(towerD/2 + 8);
@@ -566,38 +432,33 @@ const Building3D = ({ floors, anomalies, onSelectFloor, selectedFloor, maintenan
 
         if (isMaint) {
           mesh.material.color.setHex(0x6366f1);
-          mesh.material.opacity = 0.5 + Math.sin(time * 2) * 0.15;
+          mesh.material.opacity = 0.6 + Math.sin(time * 2) * 0.2;
           mesh.userData.wire.material.color.setHex(0x818cf8);
-          mesh.userData.wire.material.opacity = 0.95;
+          mesh.userData.wire.material.opacity = 0.9;
         } else if (isCrit) {
           mesh.material.color.setHex(0xff2020);
-          mesh.material.opacity = 0.6 * pulse;
+          mesh.material.opacity = 0.7 * pulse;
           mesh.userData.wire.material.color.setHex(0xff4040);
-          mesh.userData.wire.material.opacity = 0.95;
-          mesh.position.y = mesh.userData.baseY + Math.sin(time * 8) * 0.02;
+          mesh.position.y = mesh.userData.baseY + Math.sin(time * 8) * 0.03;
         } else if (isWarn) {
           mesh.material.color.setHex(0xffaa00);
-          mesh.material.opacity = 0.5 * pulse;
+          mesh.material.opacity = 0.6 * pulse;
           mesh.userData.wire.material.color.setHex(0xffcc00);
-          mesh.userData.wire.material.opacity = 0.9;
           mesh.position.y = mesh.userData.baseY;
         } else if (isSel) {
           mesh.material.color.setHex(0x2dd4bf);
-          mesh.material.opacity = 0.5;
+          mesh.material.opacity = 0.7;
           mesh.userData.wire.material.color.setHex(0x4eeedd);
-          mesh.userData.wire.material.opacity = 0.95;
         } else if (isHov) {
-          mesh.material.color.setHex(0x2a4050);
-          mesh.material.opacity = 0.35;
-          mesh.userData.wire.material.color.setHex(0x6699aa);
-          mesh.userData.wire.material.opacity = 0.7;
+          mesh.material.color.setHex(0x1a5060);
+          mesh.material.opacity = 0.6;
+          mesh.userData.wire.material.color.setHex(0x3dd4bf);
         } else {
-          // Architectural blueprint style - nearly invisible by default
           const isTech = mesh.userData.isTech;
           mesh.material.color.setHex(isTech ? 0x1a1a2e : 0x1a2a3a);
-          mesh.material.opacity = 0.01; // Almost invisible
+          mesh.material.opacity = isTech ? 0.7 : 0.5;
           mesh.userData.wire.material.color.setHex(isTech ? 0xf59e0b : 0x2dd4bf);
-          mesh.userData.wire.material.opacity = 0; // Hidden wireframe by default
+          mesh.userData.wire.material.opacity = isTech ? 0.8 : 0.5;
           mesh.position.y = mesh.userData.baseY;
         }
       });
