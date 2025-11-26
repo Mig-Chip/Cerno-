@@ -1,0 +1,1009 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import * as THREE from 'three';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Area, AreaChart, Legend, ComposedChart } from 'recharts';
+import { Hexagon, AlertTriangle, AlertOctagon, CheckCircle2, Activity, Zap, Flame, ArrowUpCircle, Fan, Droplets, Building2, Search, X, ChevronRight, Wrench, Bell, MessageSquare, Bot, Send, Play, PauseCircle, Settings, Sun, Cloud, Wind, Thermometer, Clock, Cpu, TrendingDown, TrendingUp, AlertCircle, FileText, History } from 'lucide-react';
+
+const SystemType = { CLIMATE_CEILING: 'Kühl-/Heizdecke', VENTILATION: 'Lüftung', PUMPS: 'Hydraulik/Pumpen', ELEVATOR: 'Aufzüge', POWER: 'Stromverbrauch', FIRE_ALARM: 'Brandmeldeanlage' };
+const Severity = { CRITICAL: 'Kritisch', WARNING: 'Warnung', NORMAL: 'Normal' };
+const FloorType = { PARKING: 0, LOBBY: 1, OFFICE: 2, TECHNICAL: 3 };
+
+const createTimeSeries = (base, variance, target, trend = 'stable') => {
+  const pts = []; let cur = base; const now = Date.now();
+  for (let i = 60; i >= 0; i--) {
+    let chg = (Math.random() - 0.5) * variance;
+    if (trend === 'rising') cur += 0.08;
+    if (trend === 'spiking' && i < 15) cur += variance * 1.5;
+    cur += chg;
+    pts.push({ time: new Date(now - i * 60000).toISOString(), value: cur, target });
+  }
+  return pts;
+};
+
+// Aufheiz-Anomalie: Raum erreicht Soll-Temperatur nicht in erwarteter Zeit
+const createHeatingAnomalyTimeSeries = (startTemp, targetTemp, expectedHeatingMinutes = 30) => {
+  const pts = [];
+  const now = Date.now();
+  const totalMinutes = 60;
+
+  // Berechne erwartete Aufheizrate (°C pro Minute)
+  const expectedRate = (targetTemp - startTemp) / expectedHeatingMinutes;
+  // Tatsächliche Rate ist zu langsam (nur 40-60% der erwarteten)
+  const actualRate = expectedRate * (0.4 + Math.random() * 0.2);
+
+  let currentTemp = startTemp;
+  let expectedTemp = startTemp;
+
+  for (let i = totalMinutes; i >= 0; i--) {
+    const minutesPassed = totalMinutes - i;
+
+    // Erwartete Temperatur (ideal)
+    if (minutesPassed <= expectedHeatingMinutes) {
+      expectedTemp = startTemp + (expectedRate * minutesPassed);
+    } else {
+      expectedTemp = targetTemp;
+    }
+    expectedTemp = Math.min(expectedTemp, targetTemp);
+
+    // Tatsächliche Temperatur (zu langsam)
+    currentTemp += actualRate + (Math.random() - 0.5) * 0.1;
+    currentTemp = Math.min(currentTemp, targetTemp - 1); // Erreicht nie ganz das Ziel
+
+    // Anomalie-Markierung: Ab wann weicht es signifikant ab?
+    const deviation = expectedTemp - currentTemp;
+    const isAnomaly = deviation > 1.5; // Mehr als 1.5°C Abweichung
+
+    pts.push({
+      time: new Date(now - i * 60000).toISOString(),
+      value: currentTemp,
+      target: targetTemp,
+      expected: parseFloat(expectedTemp.toFixed(1)),
+      isAnomaly: isAnomaly,
+      deviation: parseFloat(deviation.toFixed(1))
+    });
+  }
+  return pts;
+};
+
+const generateBuildingState = () => {
+  const floors = [], anomalies = [];
+  for (let lvl = -4; lvl <= 40; lvl++) {
+    let type = FloorType.OFFICE, zone = 'Low-Rise';
+    let id = lvl === 0 ? 'EG' : lvl < 0 ? `U${Math.abs(lvl)}` : `E${lvl.toString().padStart(2, '0')}`;
+    if (lvl < 0) { type = FloorType.PARKING; zone = 'Tiefgarage'; }
+    else if (lvl === 0) { type = FloorType.LOBBY; zone = 'Foyer'; }
+    else if (lvl === 3 || lvl === 39) { type = FloorType.TECHNICAL; zone = 'Technik'; }
+    else if (lvl > 20) zone = 'High-Rise';
+    floors.push({ id, level: lvl, type, zone, systems: {}, maintenance: false });
+  }
+  return { floors, activeAnomalies: anomalies };
+};
+
+const simulateFault = (state) => {
+  const availableFloors = state.floors.filter(f => f.level >= 0 && !f.maintenance);
+  if (availableFloors.length === 0) return state;
+  const floor = availableFloors[Math.floor(Math.random() * availableFloors.length)];
+  
+  // Aufzüge - nur einfache Störung/Wartung Meldung
+  const elevatorFaults = [
+    { desc: 'Störung: Aufzug A1', tech: 'Aufzug A1 meldet Störung. Keine weiteren Details verfügbar.', causes: ['Antriebsstörung', 'Steuerungsfehler', 'Sicherheitskreis unterbrochen'] },
+    { desc: 'Störung: Aufzug A2', tech: 'Aufzug A2 meldet Störung. Keine weiteren Details verfügbar.', causes: ['Antriebsstörung', 'Steuerungsfehler', 'Sicherheitskreis unterbrochen'] },
+    { desc: 'Störung: Aufzug B1', tech: 'Aufzug B1 meldet Störung. Keine weiteren Details verfügbar.', causes: ['Antriebsstörung', 'Steuerungsfehler', 'Sicherheitskreis unterbrochen'] },
+    { desc: 'Störung: Aufzug B2', tech: 'Aufzug B2 meldet Störung. Keine weiteren Details verfügbar.', causes: ['Antriebsstörung', 'Steuerungsfehler', 'Sicherheitskreis unterbrochen'] },
+    { desc: 'Wartungsmodus: Aufzug A1', tech: 'Aufzug A1 befindet sich im Wartungsmodus.', causes: ['Planmäßige Wartung', 'Inspektion'] },
+    { desc: 'Wartungsmodus: Aufzug B2', tech: 'Aufzug B2 befindet sich im Wartungsmodus.', causes: ['Planmäßige Wartung', 'Inspektion'] },
+  ];
+  
+  // BMA - Etage, Netz/SV oder Batterie
+  const bmaFaults = [
+    { desc: `BMA Störung: ${floor.id}`, tech: `Brandmeldeanlage meldet Störung in Etage ${floor.id}. Melder oder Linie betroffen.`, causes: ['Melder verschmutzt', 'Leitungsunterbrechung', 'Melder defekt'], location: floor.id },
+    { desc: 'BMA Störung: Netz/SV', tech: 'Stromversorgungsstörung der Brandmeldeanlage. Netzausfall oder SV-Fehler.', causes: ['Netzausfall', 'Sicherung defekt', 'USV-Störung'], location: 'BMZ' },
+    { desc: 'BMA Störung: Batterie', tech: 'Batteriestörung der Brandmeldeanlage. Akkukapazität kritisch oder Ladefehler.', causes: ['Akku leer', 'Akku defekt', 'Ladegerät defekt'], location: 'BMZ' },
+  ];
+  
+  const faultTypes = [
+    // Pumpen
+    { system: SystemType.PUMPS, severity: Severity.CRITICAL, type: 'FAULT', desc: 'Störung: Pumpenausfall Hauptstrang', tech: 'Pumpe P-02 fördert nicht. Statuscode: E-502.', causes: ['Motorschaden', 'Stromversorgung unterbrochen'], unit: 'bar', location: floor.id },
+    { system: SystemType.PUMPS, severity: Severity.WARNING, type: 'FAULT', desc: 'Störung: Pumpe Differenzdruck', tech: 'Differenzdruck außerhalb Toleranz. ΔP: 0.3 bar (Soll: 0.8-1.2 bar)', causes: ['Filter verstopft', 'Ventil defekt'], unit: 'bar', location: 'Technik E03' },
+    
+    // Aufzüge - vereinfacht
+    { system: SystemType.ELEVATOR, severity: Severity.WARNING, type: 'FAULT', ...elevatorFaults[Math.floor(Math.random() * elevatorFaults.length)], unit: 'Status', location: 'Aufzugsgruppe' },
+    
+    // BMA
+    { system: SystemType.FIRE_ALARM, severity: Severity.CRITICAL, type: 'FAULT', ...bmaFaults[Math.floor(Math.random() * bmaFaults.length)], unit: 'Status' },
+    
+    // Strom
+    { system: SystemType.POWER, severity: Severity.WARNING, type: 'ANOMALY', desc: 'Anomalie: Hoher Stromverbrauch', tech: `Aktuell: 12.5 kW in ${floor.id}. Erwartet: < 2.0 kW außerhalb Betriebszeiten.`, causes: ['Beleuchtung an', 'Defekte Geräte', 'Unbefugter Zugang'], unit: 'kW', location: floor.id },
+    
+    // Klimadecke
+    { system: SystemType.CLIMATE_CEILING, severity: Severity.CRITICAL, type: 'ANOMALY', desc: 'Anomalie: Taupunktunterschreitung', tech: `Luftfeuchte 82% @ 22°C in ${floor.id}. Kondensatgefahr!`, causes: ['Fenster offen', 'Außenlufteinbruch', 'Sensor defekt'], unit: '% rF', location: floor.id },
+    { system: SystemType.CLIMATE_CEILING, severity: Severity.WARNING, type: 'ANOMALY', desc: 'Anomalie: Raumtemperatur', tech: `Temperatur ${floor.id}: 26.5°C (Soll: 21-23°C)`, causes: ['Sonneneinstrahlung', 'Hohe Belegung', 'Regelventil defekt'], unit: '°C', location: floor.id },
+
+    // Aufheiz-Anomalie - Soll-Temperatur wird nicht erreicht
+    { system: SystemType.CLIMATE_CEILING, severity: Severity.WARNING, type: 'ANOMALY', desc: 'Anomalie: Aufheizzeit überschritten', tech: `${floor.id}: Soll-Temperatur 23°C nach 30 Min nicht erreicht. Aktuell: 19.8°C. Erwartete Aufheizzeit überschritten.`, causes: ['Heizkreislauf unterversorgt', 'Ventil klemmt', 'Außentemperatur zu niedrig', 'Wärmeverlust durch Fenster'], unit: '°C', location: floor.id, isHeatingAnomaly: true, startTemp: 17, targetTemp: 23 },
+    
+    // Lüftung
+    { system: SystemType.VENTILATION, severity: Severity.WARNING, type: 'FAULT', desc: 'Störung: RLT-Anlage Filter', tech: 'Filterwächter RLT-02 meldet Druckverlust > 250 Pa.', causes: ['Filter verschmutzt', 'Filterwechsel überfällig'], unit: 'Pa', location: 'Technik E39' },
+  ];
+  
+  const fault = faultTypes[Math.floor(Math.random() * faultTypes.length)];
+
+  // Verwende spezielle Zeitreihe für Aufheiz-Anomalie
+  const dataPoints = fault.isHeatingAnomaly
+    ? createHeatingAnomalyTimeSeries(fault.startTemp, fault.targetTemp, 30)
+    : createTimeSeries(10, 2, 5);
+
+  const newAnomaly = {
+    id: `fault-${fault.location || floor.id}-${Date.now()}`,
+    location: fault.location || floor.id,
+    floorLevel: floor.level,
+    zone: floor.zone,
+    system: fault.system,
+    issueType: fault.type,
+    severity: fault.severity,
+    description: fault.desc,
+    technicalDetails: fault.tech,
+    possibleCauses: fault.causes,
+    correlationInfo: fault.system === SystemType.ELEVATOR ? 'Kontaktmeldung vom Aufzugssteuerung.' : fault.system === SystemType.FIRE_ALARM ? 'Meldung von BMZ (Brandmeldezentrale).' : 'Automatisch erkannt via GLT.',
+    timestamp: new Date().toISOString(),
+    suggestedAction: 'Techniker benachrichtigen.',
+    status: 'OPEN',
+    dataPoints: dataPoints,
+    history: [],
+    unit: fault.unit,
+    isHeatingAnomaly: fault.isHeatingAnomaly || false
+  };
+  return { ...state, activeAnomalies: [...state.activeAnomalies, newAnomaly] };
+};
+
+const getSystemIcon = (sys, size = 16) => {
+  const icons = { [SystemType.POWER]: <Zap size={size} className="text-yellow-400" />, [SystemType.FIRE_ALARM]: <Flame size={size} className="text-red-500" />, [SystemType.ELEVATOR]: <ArrowUpCircle size={size} className="text-blue-400" />, [SystemType.CLIMATE_CEILING]: <Droplets size={size} className="text-cyan-400" />, [SystemType.VENTILATION]: <Fan size={size} className="text-sky-400" />, [SystemType.PUMPS]: <Activity size={size} className="text-indigo-400" /> };
+  return icons[sys] || <AlertOctagon size={size} />;
+};
+
+const generateWeatherData = () => ({
+  temp: (Math.random() * 15 + 8).toFixed(1),
+  humidity: Math.floor(Math.random() * 30 + 45),
+  co2: Math.floor(Math.random() * 50 + 380),
+  wind: (Math.random() * 20 + 5).toFixed(1),
+  condition: ['sunny', 'cloudy', 'partly'][Math.floor(Math.random() * 3)]
+});
+
+const WeatherWidget = ({ data }) => {
+  const getWeatherIcon = () => {
+    if (data.condition === 'sunny') return <Sun size={20} className="text-yellow-400" />;
+    if (data.condition === 'cloudy') return <Cloud size={20} className="text-slate-400" />;
+    return <><Sun size={16} className="text-yellow-400" /><Cloud size={16} className="text-slate-400 -ml-2" /></>;
+  };
+  
+  return (
+    <div className="absolute top-24 left-4 bg-slate-950/90 border border-slate-700/50 rounded-xl p-3 font-mono text-xs z-10">
+      <div className="text-[10px] text-teal-500 font-bold mb-2">WETTERSTATION</div>
+      <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-800">
+        {getWeatherIcon()}
+        <span className="text-white font-bold">{data.condition === 'sunny' ? 'Sonnig' : data.condition === 'cloudy' ? 'Bewölkt' : 'Teilw. bewölkt'}</span>
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-1.5"><Thermometer size={12} className="text-red-400" /><span className="text-slate-500">Temp</span></div>
+          <span className="text-white">{data.temp}°C</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-1.5"><Droplets size={12} className="text-cyan-400" /><span className="text-slate-500">Feuchte</span></div>
+          <span className="text-white">{data.humidity}%</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-1.5"><span className="text-[10px] text-emerald-500 font-bold">CO₂</span></div>
+          <span className="text-white">{data.co2} ppm</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-1.5"><Wind size={12} className="text-sky-400" /><span className="text-slate-500">Wind</span></div>
+          <span className="text-white">{data.wind} km/h</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const KPICard = ({ icon: Icon, label, value, color, pulse }) => (
+  <div className="bg-slate-800/60 backdrop-blur rounded-xl p-4 border border-slate-700/50">
+    <div className="flex items-start justify-between">
+      <div><p className="text-xs text-slate-400 uppercase tracking-wider mb-1">{label}</p><p className={`text-2xl font-bold text-white ${pulse ? 'animate-pulse' : ''}`}>{value}</p></div>
+      <div className={`p-2 rounded-lg bg-${color}-500/20`}><Icon size={20} className={`text-${color}-400`} /></div>
+    </div>
+  </div>
+);
+
+const Building3D = ({ floors, anomalies, onSelectFloor, selectedFloor, maintenanceFloors }) => {
+  const containerRef = React.useRef(null);
+  const rendererRef = React.useRef(null);
+  const frameRef = React.useRef(null);
+  const floorMeshesRef = React.useRef([]);
+  const labelsRef = React.useRef([]);
+  const mouseRef = React.useRef({ isDown: false, x: 0, y: 0 });
+  const rotationRef = React.useRef({ x: 0, y: -0.5 });
+  const [hoveredFloor, setHoveredFloor] = useState(null);
+  const [tooltip, setTooltip] = useState({ show: false, x: 0, y: 0, floor: null });
+
+  const floorAnomalies = useMemo(() => {
+    const map = {};
+    if (!anomalies) return map;
+    anomalies.filter(a => a.status === 'OPEN').forEach(a => {
+      const floorId = a.location.split(' ')[0];
+      if (!map[floorId]) map[floorId] = [];
+      map[floorId].push(a);
+    });
+    return map;
+  }, [anomalies]);
+
+  useEffect(() => {
+    if (!containerRef.current || !floors || floors.length === 0) return;
+    const container = containerRef.current;
+    const width = container.clientWidth, height = container.clientHeight;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x080c12);
+    const camera = new THREE.PerspectiveCamera(35, width / height, 0.1, 500);
+    camera.position.set(50, 35, 50);
+    camera.lookAt(0, 18, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    scene.add(new THREE.AmbientLight(0x334455, 0.5));
+    const dirLight = new THREE.DirectionalLight(0x6688aa, 0.6);
+    dirLight.position.set(20, 40, 20);
+    scene.add(dirLight);
+
+    const buildingGroup = new THREE.Group();
+    scene.add(buildingGroup);
+
+    const floorH = 0.8, towerW = 7, towerD = 5.5;
+    const resW = 4, resD = 4.5, resFloors = 17, resX = -8;
+    const podiumW = 14, podiumD = 7, podiumH = 2.5;
+
+    const sortedFloors = [...floors].sort((a, b) => a.level - b.level);
+    floorMeshesRef.current = [];
+    labelsRef.current = [];
+
+    // Floor labels using sprites
+    const createLabel = (text, position) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 32;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#2dd4bf';
+      ctx.font = 'bold 20px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(text, 32, 22);
+      const texture = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.8 });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.copy(position);
+      sprite.scale.set(2, 1, 1);
+      return sprite;
+    };
+
+    sortedFloors.forEach(floor => {
+      if (floor.level < 0) return;
+      const y = floor.level * floorH;
+      let w = towerW, d = towerD, h = floorH * 0.9;
+      if (floor.level === 0) { h = floorH * 2; w += 0.5; d += 0.5; }
+      if (floor.type === FloorType.TECHNICAL) h = floorH * 1.1;
+
+      const geo = new THREE.BoxGeometry(w, h, d);
+      const isTechFloor = floor.type === FloorType.TECHNICAL;
+      const mat = new THREE.MeshBasicMaterial({ color: isTechFloor ? 0x1a1a2e : 0x1a2a3a, transparent: true, opacity: isTechFloor ? 0.7 : 0.6 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(0, y + h/2, 0);
+      mesh.userData = { floorId: floor.id, floor, baseY: y + h/2, isTech: isTechFloor };
+      buildingGroup.add(mesh);
+      floorMeshesRef.current.push(mesh);
+
+      const edges = new THREE.EdgesGeometry(geo);
+      const lineMat = new THREE.LineBasicMaterial({ color: isTechFloor ? 0xf59e0b : 0x2dd4bf, transparent: true, opacity: isTechFloor ? 0.9 : 0.7 });
+      const wire = new THREE.LineSegments(edges, lineMat);
+      wire.position.copy(mesh.position);
+      buildingGroup.add(wire);
+      mesh.userData.wire = wire;
+
+      // Add floor number labels every 5 floors + special floors
+      if (floor.level % 5 === 0 || floor.level === 0 || floor.level === 40 || isTechFloor) {
+        const label = createLabel(isTechFloor ? `${floor.id} ⚙` : floor.id, new THREE.Vector3(towerW/2 + 1.5, y + h/2, 0));
+        buildingGroup.add(label);
+        labelsRef.current.push(label);
+      }
+    });
+
+    // Underground
+    sortedFloors.filter(f => f.level < 0).forEach(floor => {
+      const y = floor.level * floorH * 0.7;
+      const geo = new THREE.BoxGeometry(towerW + 3, floorH * 0.6, towerD + 3);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x0a1520, transparent: true, opacity: 0.5 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(-1.5, y, 0);
+      mesh.userData = { floorId: floor.id, floor, baseY: y };
+      buildingGroup.add(mesh);
+      floorMeshesRef.current.push(mesh);
+      const edges = new THREE.EdgesGeometry(geo);
+      const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x1a4a5a, opacity: 0.5, transparent: true }));
+      wire.position.copy(mesh.position);
+      buildingGroup.add(wire);
+      mesh.userData.wire = wire;
+    });
+
+    // Wohnturm
+    const resHeight = resFloors * floorH;
+    const resGeo = new THREE.BoxGeometry(resW, resHeight, resD);
+    const resMesh = new THREE.Mesh(resGeo, new THREE.MeshBasicMaterial({ color: 0x152030, transparent: true, opacity: 0.5 }));
+    resMesh.position.set(resX, resHeight/2, 0);
+    buildingGroup.add(resMesh);
+    buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(resGeo), new THREE.LineBasicMaterial({ color: 0x1a6a7a, opacity: 0.6, transparent: true })).translateX(resX).translateY(resHeight/2));
+
+    for (let i = 1; i < resFloors; i++) {
+      const lineY = i * floorH;
+      const pts = [new THREE.Vector3(resX - resW/2, lineY, -resD/2), new THREE.Vector3(resX + resW/2, lineY, -resD/2), new THREE.Vector3(resX + resW/2, lineY, resD/2), new THREE.Vector3(resX - resW/2, lineY, resD/2), new THREE.Vector3(resX - resW/2, lineY, -resD/2)];
+      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x1a5060, opacity: 0.3, transparent: true })));
+    }
+
+    // Podium
+    const podiumGeo = new THREE.BoxGeometry(podiumW, podiumH, podiumD);
+    const podium = new THREE.Mesh(podiumGeo, new THREE.MeshBasicMaterial({ color: 0x1a2535, transparent: true, opacity: 0.4 }));
+    podium.position.set(-4, podiumH/2, 0);
+    buildingGroup.add(podium);
+    buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(podiumGeo), new THREE.LineBasicMaterial({ color: 0x2a7a8a, opacity: 0.5, transparent: true })).translateX(-4).translateY(podiumH/2));
+
+    // === PARK (Wireframe Style) - FRONT SIDE ===
+    const parkZ = -(towerD/2 + 8);
+    
+    // Ground plane for park
+    const groundGeo = new THREE.PlaneGeometry(25, 12);
+    const groundMat = new THREE.MeshBasicMaterial({ color: 0x0a1a15, transparent: true, opacity: 0.3 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set(-2, -0.1, parkZ);
+    buildingGroup.add(ground);
+    
+    // Park border
+    const parkBorder = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-14, 0, parkZ - 6), new THREE.Vector3(10, 0, parkZ - 6),
+      new THREE.Vector3(10, 0, parkZ + 6), new THREE.Vector3(-14, 0, parkZ + 6),
+      new THREE.Vector3(-14, 0, parkZ - 6)
+    ]);
+    buildingGroup.add(new THREE.Line(parkBorder, new THREE.LineBasicMaterial({ color: 0x2a5a4a, opacity: 0.6, transparent: true })));
+
+    // Wireframe trees
+    const createTree = (x, z, height, radius) => {
+      // Trunk
+      const trunkGeo = new THREE.CylinderGeometry(0.1, 0.15, height * 0.4, 6);
+      const trunk = new THREE.Mesh(trunkGeo, new THREE.MeshBasicMaterial({ color: 0x1a3025, transparent: true, opacity: 0.5 }));
+      trunk.position.set(x, height * 0.2, z);
+      buildingGroup.add(trunk);
+      buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(trunkGeo), new THREE.LineBasicMaterial({ color: 0x3a6a5a })).translateX(x).translateY(height * 0.2).translateZ(z));
+
+      // Canopy (icosahedron for organic look)
+      const canopyGeo = new THREE.IcosahedronGeometry(radius, 0);
+      const canopy = new THREE.Mesh(canopyGeo, new THREE.MeshBasicMaterial({ color: 0x0a2a1a, transparent: true, opacity: 0.3 }));
+      canopy.position.set(x, height * 0.6 + radius * 0.5, z);
+      buildingGroup.add(canopy);
+      buildingGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(canopyGeo), new THREE.LineBasicMaterial({ color: 0x2dd4bf, opacity: 0.5, transparent: true })).translateX(x).translateY(height * 0.6 + radius * 0.5).translateZ(z));
+    };
+
+    // Tree positions
+    const trees = [
+      { x: -10, z: parkZ - 2, h: 3, r: 1.2 }, { x: -7, z: parkZ + 3, h: 4, r: 1.5 },
+      { x: -4, z: parkZ - 3, h: 3.5, r: 1.3 }, { x: -1, z: parkZ + 2, h: 4.5, r: 1.6 },
+      { x: 2, z: parkZ - 1, h: 3, r: 1.1 }, { x: 5, z: parkZ + 3, h: 3.5, r: 1.4 },
+      { x: 7, z: parkZ - 2, h: 4, r: 1.5 }, { x: -12, z: parkZ + 1, h: 3, r: 1.2 },
+    ];
+    trees.forEach(t => createTree(t.x, t.z, t.h, t.r));
+
+    // Paths in park
+    const pathMat = new THREE.LineBasicMaterial({ color: 0x4a7a6a, opacity: 0.4, transparent: true });
+    const path1 = [new THREE.Vector3(-14, 0.05, parkZ), new THREE.Vector3(-5, 0.05, parkZ), new THREE.Vector3(0, 0.05, parkZ + 2), new THREE.Vector3(10, 0.05, parkZ + 2)];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(path1), pathMat));
+    const path2 = [new THREE.Vector3(-5, 0.05, parkZ), new THREE.Vector3(-2, 0.05, parkZ - 4)];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(path2), pathMat));
+
+    // Ground grid
+    const gridMat = new THREE.LineBasicMaterial({ color: 0x1a2a3a, transparent: true, opacity: 0.4 });
+    for (let i = -20; i <= 20; i += 2) {
+      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-25, -3, i), new THREE.Vector3(25, -3, i)]), gridMat));
+      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(i, -3, -25), new THREE.Vector3(i, -3, 25)]), gridMat));
+    }
+
+    let time = 0;
+    const animate = () => {
+      frameRef.current = requestAnimationFrame(animate);
+      time += 0.02;
+      buildingGroup.rotation.y = rotationRef.current.y;
+      buildingGroup.rotation.x = rotationRef.current.x;
+
+      floorMeshesRef.current.forEach(mesh => {
+        const fid = mesh.userData.floorId;
+        const hasAnom = floorAnomalies[fid];
+        const isMaint = maintenanceFloors?.includes(fid);
+        const isCrit = hasAnom?.some(a => a.severity === Severity.CRITICAL);
+        const isWarn = hasAnom?.some(a => a.severity === Severity.WARNING);
+        const isSel = selectedFloor === fid;
+        const isHov = hoveredFloor === fid;
+        const pulse = Math.sin(time * 5) * 0.3 + 0.7;
+
+        if (isMaint) {
+          mesh.material.color.setHex(0x6366f1);
+          mesh.material.opacity = 0.6 + Math.sin(time * 2) * 0.2;
+          mesh.userData.wire.material.color.setHex(0x818cf8);
+          mesh.userData.wire.material.opacity = 0.9;
+        } else if (isCrit) {
+          mesh.material.color.setHex(0xff2020);
+          mesh.material.opacity = 0.7 * pulse;
+          mesh.userData.wire.material.color.setHex(0xff4040);
+          mesh.position.y = mesh.userData.baseY + Math.sin(time * 8) * 0.03;
+        } else if (isWarn) {
+          mesh.material.color.setHex(0xffaa00);
+          mesh.material.opacity = 0.6 * pulse;
+          mesh.userData.wire.material.color.setHex(0xffcc00);
+          mesh.position.y = mesh.userData.baseY;
+        } else if (isSel) {
+          mesh.material.color.setHex(0x2dd4bf);
+          mesh.material.opacity = 0.7;
+          mesh.userData.wire.material.color.setHex(0x4eeedd);
+        } else if (isHov) {
+          mesh.material.color.setHex(0x1a5060);
+          mesh.material.opacity = 0.6;
+          mesh.userData.wire.material.color.setHex(0x3dd4bf);
+        } else {
+          const isTech = mesh.userData.isTech;
+          mesh.material.color.setHex(isTech ? 0x1a1a2e : 0x1a2a3a);
+          mesh.material.opacity = isTech ? 0.7 : 0.5;
+          mesh.userData.wire.material.color.setHex(isTech ? 0xf59e0b : 0x2dd4bf);
+          mesh.userData.wire.material.opacity = isTech ? 0.8 : 0.5;
+          mesh.position.y = mesh.userData.baseY;
+        }
+      });
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    const onMouseDown = e => { mouseRef.current = { isDown: true, x: e.clientX, y: e.clientY }; };
+    const onMouseUp = () => { mouseRef.current.isDown = false; };
+    const onMouseMove = e => {
+      if (mouseRef.current.isDown) {
+        rotationRef.current.y += (e.clientX - mouseRef.current.x) * 0.005;
+        mouseRef.current.x = e.clientX; mouseRef.current.y = e.clientY;
+      }
+      const rect = container.getBoundingClientRect();
+      const mouse = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(floorMeshesRef.current);
+      if (hits.length > 0 && hits[0].object.userData.floorId) {
+        setHoveredFloor(hits[0].object.userData.floorId);
+        setTooltip({ show: true, x: e.clientX - rect.left, y: e.clientY - rect.top, floor: hits[0].object.userData.floor });
+        container.style.cursor = 'pointer';
+      } else { setHoveredFloor(null); setTooltip({ show: false, x: 0, y: 0, floor: null }); container.style.cursor = 'grab'; }
+    };
+    const onClick = e => {
+      const rect = container.getBoundingClientRect();
+      const mouse = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(floorMeshesRef.current);
+      if (hits.length > 0 && hits[0].object.userData.floorId) onSelectFloor(hits[0].object.userData.floorId);
+    };
+    const onWheel = e => { e.preventDefault(); camera.position.z = Math.max(30, Math.min(100, camera.position.z + e.deltaY * 0.05)); camera.position.x = camera.position.z; camera.position.y = camera.position.z * 0.7; camera.lookAt(0, 18, 0); };
+    const onResize = () => { const w = container.clientWidth, h = container.clientHeight; camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h); };
+
+    container.addEventListener('mousedown', onMouseDown); container.addEventListener('mouseup', onMouseUp); container.addEventListener('mouseleave', onMouseUp);
+    container.addEventListener('mousemove', onMouseMove); container.addEventListener('click', onClick);
+    container.addEventListener('wheel', onWheel, { passive: false }); window.addEventListener('resize', onResize);
+
+    return () => { cancelAnimationFrame(frameRef.current); container.removeEventListener('mousedown', onMouseDown); container.removeEventListener('mouseup', onMouseUp); container.removeEventListener('mouseleave', onMouseUp); container.removeEventListener('mousemove', onMouseMove); container.removeEventListener('click', onClick); container.removeEventListener('wheel', onWheel); window.removeEventListener('resize', onResize); renderer.dispose(); if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement); };
+  }, [floors, floorAnomalies, hoveredFloor, selectedFloor, maintenanceFloors, onSelectFloor]);
+
+  return (
+    <div ref={containerRef} className="w-full h-full relative cursor-grab">
+      {(!floors || floors.length === 0) && <div className="absolute inset-0 flex items-center justify-center"><div className="w-10 h-10 border-2 border-teal-500 border-t-transparent rounded-full animate-spin" /></div>}
+      {tooltip.show && tooltip.floor && (
+        <div className="absolute pointer-events-none z-20 bg-slate-950/95 border border-teal-700/50 rounded-lg px-3 py-2 font-mono text-xs" style={{ left: tooltip.x + 15, top: tooltip.y - 10 }}>
+          <div className="flex items-center gap-2">
+            <span className="text-teal-400 font-bold text-sm">{tooltip.floor.id}</span>
+            {maintenanceFloors?.includes(tooltip.floor.id) && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-500/30 text-indigo-400">WARTUNG</span>}
+            {floorAnomalies[tooltip.floor.id] && <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${floorAnomalies[tooltip.floor.id].some(a => a.severity === Severity.CRITICAL) ? 'bg-red-500/30 text-red-400' : 'bg-amber-500/30 text-amber-400'}`}>{floorAnomalies[tooltip.floor.id].some(a => a.severity === Severity.CRITICAL) ? 'KRITISCH' : 'WARNUNG'}</span>}
+          </div>
+          <div className="text-slate-500 mt-1">{tooltip.floor.type === FloorType.TECHNICAL ? 'Technikzentrale' : tooltip.floor.type === FloorType.LOBBY ? 'Lobby' : tooltip.floor.type === FloorType.PARKING ? 'Tiefgarage' : 'Büroetage'}</div>
+        </div>
+      )}
+      <div className="absolute top-4 left-4 bg-slate-950/90 border border-teal-800/40 rounded-lg p-3 font-mono">
+        <div className="text-teal-400 font-bold">TAUNUSTURM</div>
+        <div className="text-slate-500 text-[10px] mt-1">170m • 40 Etagen</div>
+      </div>
+      <div className="absolute bottom-4 left-4 bg-slate-950/90 border border-slate-700/50 rounded-lg p-2 text-[10px] font-mono">
+        <div className="text-teal-500 font-bold mb-1">LEGENDE</div>
+        <div className="flex items-center gap-2 text-slate-400"><div className="w-3 h-2 bg-red-500/70 border border-red-400" />Kritisch</div>
+        <div className="flex items-center gap-2 text-slate-400"><div className="w-3 h-2 bg-amber-500/70 border border-amber-400" />Warnung</div>
+        <div className="flex items-center gap-2 text-slate-400"><div className="w-3 h-2 bg-indigo-500/70 border border-indigo-400" />Wartung</div>
+        <div className="flex items-center gap-2 text-slate-400"><div className="w-3 h-2 bg-amber-900/70 border border-amber-500" />Technik</div>
+        <div className="flex items-center gap-2 text-slate-400"><div className="w-3 h-2 bg-teal-500/50 border border-teal-400" />Normal</div>
+      </div>
+    </div>
+  );
+};
+
+const AnomalyCard = ({ anomaly, onClick }) => (
+  <div onClick={onClick} className={`relative p-3 rounded-xl border cursor-pointer transition-all hover:translate-x-1 ${anomaly.severity === Severity.CRITICAL ? 'bg-red-950/30 border-red-800/50 hover:border-red-500/70' : 'bg-amber-950/20 border-amber-800/40 hover:border-amber-500/60'}`}>
+    <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-l ${anomaly.severity === Severity.CRITICAL ? 'bg-red-500' : 'bg-amber-500'}`} />
+    <div className="flex items-center justify-between mb-2">
+      <span className={`text-[9px] font-bold px-2 py-0.5 rounded ${anomaly.issueType === 'FAULT' ? 'bg-red-500/20 text-red-400' : 'bg-purple-500/20 text-purple-400'}`}>{anomaly.issueType === 'FAULT' ? 'STÖRUNG' : 'ANOMALIE'}</span>
+      <ChevronRight size={14} className="text-slate-500" />
+    </div>
+    <p className="text-[10px] text-slate-500 mb-1">{anomaly.location}</p>
+    <h4 className="text-sm font-medium text-white flex items-center gap-2 mb-1">{getSystemIcon(anomaly.system, 14)}{anomaly.system}</h4>
+    <p className="text-xs text-slate-400 line-clamp-2">{anomaly.description}</p>
+    <p className="text-[10px] text-teal-600 mt-2">{new Date(anomaly.timestamp).toLocaleTimeString('de-DE')}</p>
+  </div>
+);
+
+const generateAIRecommendation = (anomaly) => {
+  // Spezielle Empfehlungen basierend auf Beschreibung
+
+  // Aufheiz-Anomalie
+  if (anomaly.description.includes('Aufheizzeit überschritten') || anomaly.isHeatingAnomaly) {
+    return {
+      priority: 'Hoch',
+      action: 'Die Soll-Temperatur wird nicht innerhalb der erwarteten Aufheizzeit erreicht. Dies deutet auf ein Problem im Heizkreislauf hin. Prüfen Sie zunächst, ob das Regelventil korrekt öffnet und ob der Heizkreislauf ausreichend versorgt wird. Externe Faktoren wie offene Fenster oder extreme Außentemperaturen können ebenfalls die Ursache sein.',
+      impact: 'Komforteinschränkung für Nutzer, erhöhter Energieverbrauch durch verlängerte Heizphase, möglicher Hinweis auf Systemdefekt',
+      nextSteps: [
+        'Regelventil-Stellung prüfen (GLT-Befehl: Ventil 100% öffnen)',
+        'Vorlauftemperatur am Heizkreisverteiler messen',
+        'Fenster und Türen auf korrekten Verschluss prüfen',
+        'Außentemperatur und Wetterdaten berücksichtigen',
+        'Bei wiederkehrender Anomalie: Hydraulischen Abgleich durchführen'
+      ]
+    };
+  }
+
+  if (anomaly.description.includes('Wartungsmodus')) {
+    return { priority: 'Info', action: 'Aufzug befindet sich planmäßig im Wartungsmodus. Keine Aktion erforderlich. Wartungsfirma ist vor Ort.', impact: 'Reduzierte Aufzugskapazität während Wartung', nextSteps: ['Wartungsende überwachen', 'Bei Überschreitung nachfragen'] };
+  }
+  
+  if (anomaly.description.includes('BMA') && anomaly.description.includes('Netz/SV')) {
+    return { priority: 'Kritisch', action: 'Stromversorgungsstörung der Brandmeldeanlage! USV prüfen, Netzversorgung kontrollieren. Bei anhaltendem Ausfall ist die Brandmeldeanlage nicht funktionsfähig - Brandwache erforderlich!', impact: 'Brandmeldeanlage außer Betrieb - Erhöhtes Sicherheitsrisiko', nextSteps: ['Sofort Elektrofachkraft alarmieren', 'USV-Status in BMZ prüfen', 'Ggf. Brandwache einrichten', 'Feuerwehr informieren'] };
+  }
+  
+  if (anomaly.description.includes('BMA') && anomaly.description.includes('Batterie')) {
+    return { priority: 'Hoch', action: 'Batteriestörung reduziert Notstromkapazität. Bei Netzausfall ist nur begrenzte Überbrückung möglich. Batteriezustand prüfen und ggf. tauschen.', impact: 'Eingeschränkte Notstromversorgung der BMA', nextSteps: ['Akkuspannung messen', 'Ladekreis prüfen', 'Ersatzakku bestellen', 'Innerhalb 24h beheben'] };
+  }
+  
+  if (anomaly.description.includes('BMA Störung:') && !anomaly.description.includes('Netz') && !anomaly.description.includes('Batterie')) {
+    return { priority: 'Hoch', action: `Melderstörung in betroffener Zone. Bereich ist nicht überwacht! Melder vor Ort prüfen, Verschmutzung oder Beschädigung ausschließen. Bei Leitungsfehler: Linienprüfung durchführen.`, impact: 'Brandschutz in betroffener Zone eingeschränkt', nextSteps: ['Melder visuell prüfen', 'Ggf. Melder tauschen', 'Linienprotokoll auswerten', 'Prüfung dokumentieren'] };
+  }
+  
+  const recommendations = {
+    [SystemType.PUMPS]: { priority: 'Hoch', action: 'Sofortige Inspektion der Pumpenanlage erforderlich. Prüfen Sie zuerst die Stromversorgung und Sicherungen. Bei Motorschaden: Redundanzpumpe manuell aktivieren und Ersatzteil bestellen. Geschätzte Behebungszeit: 2-4 Stunden.', impact: 'Heiz-/Kühlversorgung mehrerer Etagen gefährdet', nextSteps: ['Techniker alarmieren', 'Redundanzsystem prüfen', 'Betroffene Mieter informieren'] },
+    [SystemType.ELEVATOR]: { priority: 'Mittel', action: 'Aufzugsstörung gemeldet. Aufzug außer Betrieb nehmen und Wartungsfirma kontaktieren. Detaillierte Fehleranalyse nur vor Ort durch Fachpersonal möglich.', impact: 'Reduzierte Aufzugskapazität, Barrierefreiheit eingeschränkt', nextSteps: ['Aufzug sperren', 'Wartungsfirma anrufen', 'Nutzer informieren'] },
+    [SystemType.POWER]: { priority: 'Mittel', action: 'Ungewöhnlicher Stromverbrauch außerhalb der Betriebszeiten. Sicherheitsdienst sollte betroffenen Bereich inspizieren. Mögliche Ursachen: vergessene Geräte, defekte Beleuchtungssteuerung oder unbefugter Zugang.', impact: 'Erhöhte Energiekosten, potentielles Sicherheitsrisiko', nextSteps: ['Vor-Ort-Kontrolle', 'Stromkreise prüfen', 'GLT-Protokolle auswerten'] },
+    [SystemType.CLIMATE_CEILING]: { priority: 'Hoch', action: 'Taupunktunterschreitung kann zu Kondensatbildung und Wasserschäden führen. Sofort Kühldecke in diesem Bereich deaktivieren. Fenster und Lüftungsklappen auf korrekten Zustand prüfen.', impact: 'Mögliche Wasserschäden, Schimmelgefahr', nextSteps: ['Kühldecke abschalten', 'Fenster prüfen', 'Raumklima überwachen'] },
+    [SystemType.FIRE_ALARM]: { priority: 'Kritisch', action: 'BMA-Störung erfordert sofortige Aufmerksamkeit. Brandmeldezentrale prüfen und Störungsdetails auslesen. Bei Zonenstörung: Ersatzüberwachung sicherstellen.', impact: 'Brandschutz eingeschränkt', nextSteps: ['BMZ prüfen', 'Störung quittieren', 'Fachfirma informieren'] },
+    [SystemType.VENTILATION]: { priority: 'Mittel', action: 'Filterwächter meldet erhöhten Druckverlust. Filterwechsel einplanen. Bei starker Verschmutzung kann die Luftqualität beeinträchtigt sein.', impact: 'Reduzierte Luftqualität, erhöhter Energieverbrauch', nextSteps: ['Filter prüfen', 'Wartung beauftragen', 'Wechselintervall anpassen'] },
+  };
+  return recommendations[anomaly.system] || { priority: 'Normal', action: 'Standardwartung durchführen.', impact: 'Gering', nextSteps: ['Protokoll erstellen'] };
+};
+
+const generateHistory = (anomaly) => {
+  const histories = [
+    { date: '12.11.2024 14:23', issue: 'Ähnliche Störung', resolution: 'Sensor getauscht', duration: '45 min' },
+    { date: '28.09.2024 09:15', issue: 'Wartung', resolution: 'Planmäßig', duration: '2 h' },
+    { date: '03.08.2024 16:42', issue: 'Grenzwertüberschreitung', resolution: 'Parameter angepasst', duration: '15 min' },
+  ];
+  return Math.random() > 0.3 ? histories.slice(0, Math.floor(Math.random() * 3) + 1) : [];
+};
+
+const DetailModal = ({ anomaly, onClose, onResolve }) => {
+  const [comment, setComment] = useState('');
+  const [activeTab, setActiveTab] = useState('details');
+  
+  if (!anomaly) return null;
+  
+  const aiRec = generateAIRecommendation(anomaly);
+  const history = generateHistory(anomaly);
+
+  // Spezielle Chart-Daten für Aufheiz-Anomalie
+  const chartData = anomaly.dataPoints?.slice(-30).map((p, i) => ({
+    time: new Date(p.time).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
+    value: parseFloat(p.value.toFixed(1)),
+    target: p.target,
+    expected: p.expected || null,
+    isAnomaly: p.isAnomaly || false,
+    deviation: p.deviation || 0
+  })) || [];
+
+  // Finde die Anomalie-Zone (wo isAnomaly = true)
+  const anomalyStartIndex = chartData.findIndex(p => p.isAnomaly);
+  const anomalyStart = anomalyStartIndex >= 0 ? chartData[anomalyStartIndex]?.time : null;
+
+  const currentValue = anomaly.dataPoints?.[anomaly.dataPoints.length - 1]?.value?.toFixed(1) || '-';
+  const targetValue = anomaly.dataPoints?.[0]?.target || '-';
+  const expectedValue = anomaly.dataPoints?.[anomaly.dataPoints.length - 1]?.expected?.toFixed(1) || null;
+  const trend = anomaly.dataPoints ? (anomaly.dataPoints[anomaly.dataPoints.length - 1]?.value > anomaly.dataPoints[anomaly.dataPoints.length - 10]?.value ? 'up' : 'down') : 'stable';
+  const isHeatingAnomaly = anomaly.isHeatingAnomaly || false;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        
+        <div className="p-5 border-b border-slate-800 flex justify-between items-start">
+          <div className="flex-1">
+            <div className="flex items-center gap-3 mb-2">
+              <span className={`text-[10px] font-bold px-2 py-1 rounded ${anomaly.issueType === 'FAULT' ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-purple-500/20 text-purple-400 border border-purple-500/30'}`}>
+                {anomaly.issueType === 'FAULT' ? 'STÖRUNG' : 'ANOMALIE'}
+              </span>
+              <span className={`text-[10px] font-bold px-2 py-1 rounded ${anomaly.severity === Severity.CRITICAL ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                {anomaly.severity}
+              </span>
+              <span className="text-[10px] text-slate-500 flex items-center gap-1"><Clock size={10} />{new Date(anomaly.timestamp).toLocaleString('de-DE')}</span>
+            </div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">{getSystemIcon(anomaly.system, 20)}{anomaly.description}</h2>
+            <p className="text-sm text-slate-400 mt-1">{anomaly.location} • {anomaly.zone} • {anomaly.system}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-lg"><X size={20} className="text-slate-400" /></button>
+        </div>
+
+        <div className="flex border-b border-slate-800">
+          {[{ id: 'details', label: 'Details', icon: FileText }, { id: 'analysis', label: 'KI-Analyse', icon: Cpu }, { id: 'history', label: 'Historie', icon: History }].map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === tab.id ? 'border-teal-500 text-teal-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
+              <tab.icon size={16} />{tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-5">
+          {activeTab === 'details' && (
+            <div className="space-y-5">
+              {/* KPI Cards - erweitert für Aufheiz-Anomalie */}
+              <div className={`grid ${isHeatingAnomaly ? 'grid-cols-4' : 'grid-cols-3'} gap-4`}>
+                <div className="bg-slate-800/50 rounded-xl p-4 text-center">
+                  <p className="text-xs text-slate-500 mb-1">Aktueller Wert</p>
+                  <p className="text-2xl font-bold text-white flex items-center justify-center gap-2">
+                    {currentValue} <span className="text-sm text-slate-500">{anomaly.unit}</span>
+                    {trend === 'up' ? <TrendingUp size={18} className="text-red-400" /> : <TrendingDown size={18} className="text-emerald-400" />}
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-xl p-4 text-center">
+                  <p className="text-xs text-slate-500 mb-1">Sollwert</p>
+                  <p className="text-2xl font-bold text-teal-400">{targetValue} <span className="text-sm text-slate-500">{anomaly.unit}</span></p>
+                </div>
+                {isHeatingAnomaly && expectedValue && (
+                  <div className="bg-slate-800/50 rounded-xl p-4 text-center border border-cyan-700/30">
+                    <p className="text-xs text-cyan-500 mb-1">Erwartet (jetzt)</p>
+                    <p className="text-2xl font-bold text-cyan-400">{expectedValue} <span className="text-sm text-slate-500">{anomaly.unit}</span></p>
+                  </div>
+                )}
+                <div className="bg-slate-800/50 rounded-xl p-4 text-center">
+                  <p className="text-xs text-slate-500 mb-1">Abweichung</p>
+                  <p className="text-2xl font-bold text-amber-400">{((currentValue - targetValue) / targetValue * 100).toFixed(0)}%</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-800/30 rounded-xl p-4">
+                <h3 className="text-xs text-teal-500 font-bold mb-3 flex items-center gap-2">
+                  <Activity size={14} />
+                  {isHeatingAnomaly ? 'AUFHEIZ-VERLAUF MIT ANOMALIE-ERKENNUNG' : 'MESSWERT-VERLAUF (letzte 30 Min)'}
+                </h3>
+
+                {/* Legende für Aufheiz-Anomalie */}
+                {isHeatingAnomaly && (
+                  <div className="flex items-center gap-4 mb-3 text-[10px]">
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-3 h-0.5 bg-amber-500"></div>
+                      <span className="text-slate-400">Ist-Temperatur</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-3 h-0.5 bg-cyan-500 opacity-70" style={{borderStyle: 'dashed'}}></div>
+                      <span className="text-slate-400">Erwartete Aufheizkurve</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-3 h-0.5 bg-teal-500" style={{borderStyle: 'dashed'}}></div>
+                      <span className="text-slate-400">Soll-Temperatur</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-3 h-3 bg-red-500/20 border border-red-500/50"></div>
+                      <span className="text-slate-400">Anomalie-Zone</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    {isHeatingAnomaly ? (
+                      <ComposedChart data={chartData}>
+                        <defs>
+                          <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
+                          </linearGradient>
+                          <linearGradient id="colorExpected" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.15}/>
+                            <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
+                          </linearGradient>
+                          <linearGradient id="anomalyZone" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#ef4444" stopOpacity={0.15}/>
+                            <stop offset="100%" stopColor="#ef4444" stopOpacity={0.05}/>
+                          </linearGradient>
+                        </defs>
+                        <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={{ stroke: '#334155' }} tickLine={false} />
+                        <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={{ stroke: '#334155' }} tickLine={false} domain={['auto', 'auto']} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '11px' }}
+                          formatter={(value, name) => {
+                            if (name === 'value') return [`${value} °C`, 'Ist-Temperatur'];
+                            if (name === 'expected') return [`${value} °C`, 'Erwartet'];
+                            return [value, name];
+                          }}
+                          labelFormatter={(label) => `Zeit: ${label}`}
+                        />
+                        {/* Anomalie-Zone markieren */}
+                        {anomalyStart && (
+                          <ReferenceArea
+                            x1={anomalyStart}
+                            x2={chartData[chartData.length - 1]?.time}
+                            fill="url(#anomalyZone)"
+                            stroke="#ef4444"
+                            strokeOpacity={0.3}
+                          />
+                        )}
+                        {/* Soll-Temperatur Linie */}
+                        <ReferenceLine y={targetValue} stroke="#2dd4bf" strokeDasharray="5 5" strokeWidth={2} label={{ value: `Soll: ${targetValue}°C`, fill: '#2dd4bf', fontSize: 10, position: 'right' }} />
+                        {/* Erwartete Aufheizkurve */}
+                        <Area type="monotone" dataKey="expected" stroke="#06b6d4" strokeDasharray="4 4" fill="url(#colorExpected)" strokeWidth={2} dot={false} />
+                        {/* Tatsächliche Temperatur */}
+                        <Area type="monotone" dataKey="value" stroke="#f59e0b" fill="url(#colorValue)" strokeWidth={2.5} dot={false} />
+                        {/* Anomalie-Startpunkt markieren */}
+                        {anomalyStart && (
+                          <ReferenceLine x={anomalyStart} stroke="#ef4444" strokeDasharray="3 3" label={{ value: 'Anomalie erkannt', fill: '#ef4444', fontSize: 9, position: 'top' }} />
+                        )}
+                      </ComposedChart>
+                    ) : (
+                      <AreaChart data={chartData}>
+                        <defs>
+                          <linearGradient id="colorValueDefault" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={anomaly.severity === Severity.CRITICAL ? '#ef4444' : '#f59e0b'} stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor={anomaly.severity === Severity.CRITICAL ? '#ef4444' : '#f59e0b'} stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={{ stroke: '#334155' }} tickLine={false} />
+                        <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={{ stroke: '#334155' }} tickLine={false} />
+                        <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '12px' }} />
+                        <ReferenceLine y={targetValue} stroke="#2dd4bf" strokeDasharray="5 5" label={{ value: 'Soll', fill: '#2dd4bf', fontSize: 10 }} />
+                        <Area type="monotone" dataKey="value" stroke={anomaly.severity === Severity.CRITICAL ? '#ef4444' : '#f59e0b'} fill="url(#colorValueDefault)" strokeWidth={2} />
+                      </AreaChart>
+                    )}
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Zusätzliche Info bei Aufheiz-Anomalie */}
+                {isHeatingAnomaly && (
+                  <div className="mt-3 p-3 bg-red-950/30 border border-red-800/40 rounded-lg">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs text-red-400 font-bold">Aufheiz-Anomalie erkannt</p>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Die Ist-Temperatur weicht signifikant von der erwarteten Aufheizkurve ab.
+                          Nach der geplanten Aufheizzeit von 30 Minuten hätte die Soll-Temperatur von {targetValue}°C erreicht sein müssen.
+                          Aktuell: {currentValue}°C (Differenz: {(targetValue - currentValue).toFixed(1)}°C)
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-slate-800/50 rounded-xl p-4">
+                  <h3 className="text-xs text-cyan-500 font-bold mb-2">TECHNISCHE DETAILS</h3>
+                  <p className="text-sm text-slate-300">{anomaly.technicalDetails}</p>
+                  <p className="text-xs text-slate-500 mt-2">{anomaly.correlationInfo}</p>
+                </div>
+                <div className="bg-slate-800/50 rounded-xl p-4">
+                  <h3 className="text-xs text-amber-500 font-bold mb-2">MÖGLICHE URSACHEN</h3>
+                  <ul className="text-sm text-slate-300 space-y-1">{anomaly.possibleCauses.map((c, i) => <li key={i} className="flex items-start gap-2"><span className="text-amber-500 mt-1">•</span>{c}</li>)}</ul>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'analysis' && (
+            <div className="space-y-5">
+              <div className={`rounded-xl p-5 border ${aiRec.priority === 'Kritisch' ? 'bg-red-950/30 border-red-700/60' : aiRec.priority === 'Hoch' ? 'bg-red-950/20 border-red-800/50' : aiRec.priority === 'Info' ? 'bg-blue-950/20 border-blue-800/50' : 'bg-amber-950/20 border-amber-800/50'}`}>
+                <div className="flex items-center gap-3 mb-3">
+                  <Cpu size={20} className="text-teal-400" />
+                  <h3 className="text-lg font-bold text-white">KI-Handlungsempfehlung</h3>
+                  <span className={`ml-auto text-xs font-bold px-3 py-1 rounded-full ${aiRec.priority === 'Kritisch' ? 'bg-red-500/30 text-red-300' : aiRec.priority === 'Hoch' ? 'bg-red-500/20 text-red-400' : aiRec.priority === 'Info' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'}`}>Priorität: {aiRec.priority}</span>
+                </div>
+                <p className="text-sm text-slate-300 leading-relaxed">{aiRec.action}</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-slate-800/50 rounded-xl p-4">
+                  <h3 className="text-xs text-red-400 font-bold mb-2 flex items-center gap-2"><AlertCircle size={14} />AUSWIRKUNG</h3>
+                  <p className="text-sm text-slate-300">{aiRec.impact}</p>
+                </div>
+                <div className="bg-slate-800/50 rounded-xl p-4">
+                  <h3 className="text-xs text-emerald-400 font-bold mb-2">EMPFOHLENE SCHRITTE</h3>
+                  <ol className="text-sm text-slate-300 space-y-1">{aiRec.nextSteps.map((s, i) => <li key={i} className="flex items-start gap-2"><span className="text-emerald-500 font-bold">{i + 1}.</span>{s}</li>)}</ol>
+                </div>
+              </div>
+
+              <div className="bg-slate-800/30 rounded-xl p-4">
+                <h3 className="text-xs text-slate-500 font-bold mb-2">AUTOMATISCHE MASSNAHMEN</h3>
+                <div className="flex items-center gap-4 text-sm">
+                  <span className="flex items-center gap-2 text-emerald-400"><CheckCircle2 size={14} />Alarm ausgelöst</span>
+                  <span className="flex items-center gap-2 text-emerald-400"><CheckCircle2 size={14} />Protokoll erstellt</span>
+                  <span className="flex items-center gap-2 text-slate-500"><Clock size={14} />Techniker benachrichtigt (ausstehend)</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="space-y-4">
+              {history.length > 0 ? (
+                <>
+                  <p className="text-sm text-slate-400">Vergangene Ereignisse an diesem Datenpunkt:</p>
+                  {history.map((h, i) => (
+                    <div key={i} className="bg-slate-800/50 rounded-xl p-4 flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-white">{h.issue}</p>
+                        <p className="text-xs text-slate-500">{h.date}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm text-emerald-400">{h.resolution}</p>
+                        <p className="text-xs text-slate-500">Dauer: {h.duration}</p>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <div className="text-center py-10 text-slate-500">
+                  <History size={40} className="mx-auto mb-2 opacity-30" />
+                  <p className="text-sm">Keine früheren Ereignisse an diesem Datenpunkt</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="p-5 border-t border-slate-800 bg-slate-900/50">
+          <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="Notiz zur Bearbeitung..." className="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm text-white mb-3 h-16 resize-none" />
+          <div className="flex gap-3">
+            <button onClick={() => onResolve(anomaly.id, 'RESOLVED', comment)} className="flex-1 bg-emerald-600 hover:bg-emerald-500 py-2.5 rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition-colors"><CheckCircle2 size={16} />Als behoben markieren</button>
+            <button onClick={() => onResolve(anomaly.id, 'IN_PROGRESS', comment)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2.5 rounded-lg font-medium text-sm transition-colors">In Bearbeitung</button>
+            <button onClick={() => onResolve(anomaly.id, 'FALSE_POSITIVE', comment)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2.5 rounded-lg font-medium text-sm transition-colors">Fehlalarm</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ChatBot = ({ buildingState }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState([{ role: 'assistant', content: 'Hallo! Ich bin CERNO Assist. Frag mich zum Gebäudestatus.' }]);
+  const [loading, setLoading] = useState(false);
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+    const msg = input.trim(); setInput(''); setMessages(p => [...p, { role: 'user', content: msg }]); setLoading(true);
+    const openAnom = buildingState?.activeAnomalies?.filter(a => a.status === 'OPEN') || [];
+    const ctx = `Gebäude: TaunusTurm, ${buildingState?.floors?.length || 45} Etagen. Aktive Ereignisse: ${openAnom.length}. ${openAnom.map(a => `${a.location}: ${a.description}`).join('; ')}`;
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 500, system: `Du bist CERNO Assist für Gebäudemanagement. Antworte kurz auf Deutsch. Kontext: ${ctx}`, messages: [{ role: 'user', content: msg }] }) });
+      const data = await res.json(); setMessages(p => [...p, { role: 'assistant', content: data.content?.[0]?.text || 'Fehler.' }]);
+    } catch { setMessages(p => [...p, { role: 'assistant', content: 'Verbindungsfehler.' }]); }
+    setLoading(false);
+  };
+
+  if (!isOpen) return <button onClick={() => setIsOpen(true)} className="fixed bottom-6 right-6 w-14 h-14 bg-teal-600 hover:bg-teal-500 rounded-2xl flex items-center justify-center shadow-lg z-50"><MessageSquare size={24} className="text-white" /></button>;
+  return (
+    <div className="fixed bottom-6 right-6 w-80 h-96 bg-slate-900/95 border border-slate-700 rounded-2xl flex flex-col z-50">
+      <div className="p-3 border-b border-slate-800 flex justify-between items-center"><div className="flex items-center gap-2"><Bot size={16} className="text-teal-400" /><span className="font-bold text-sm">CERNO Assist</span></div><button onClick={() => setIsOpen(false)}><X size={16} className="text-slate-400" /></button></div>
+      <div className="flex-1 overflow-auto p-3 space-y-2">{messages.map((m, i) => <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] rounded-xl px-3 py-2 text-xs ${m.role === 'user' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-200'}`}>{m.content}</div></div>)}{loading && <div className="text-xs text-slate-500">Tippt...</div>}</div>
+      <div className="p-3 border-t border-slate-800 flex gap-2"><input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} placeholder="Frage..." className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white" /><button onClick={sendMessage} className="p-2 bg-teal-600 rounded-lg"><Send size={14} /></button></div>
+    </div>
+  );
+};
+
+export default function App() {
+  const [state, setState] = useState({ floors: [], activeAnomalies: [] });
+  const [selectedAnomaly, setSelectedAnomaly] = useState(null);
+  const [selectedFloor, setSelectedFloor] = useState(null);
+  const [maintenanceFloors, setMaintenanceFloors] = useState([]);
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [time, setTime] = useState(new Date());
+  const [weather, setWeather] = useState(generateWeatherData());
+
+  useEffect(() => { 
+    setState(generateBuildingState()); 
+    const t = setInterval(() => setTime(new Date()), 1000); 
+    const w = setInterval(() => setWeather(generateWeatherData()), 60000);
+    return () => { clearInterval(t); clearInterval(w); }; 
+  }, []);
+
+  const resolve = (id, status) => { setState(p => ({ ...p, activeAnomalies: p.activeAnomalies.map(a => a.id === id ? { ...a, status } : a) })); setSelectedAnomaly(null); };
+  
+  const toggleMaintenance = useCallback((floorId) => {
+    setMaintenanceFloors(p => p.includes(floorId) ? p.filter(f => f !== floorId) : [...p, floorId]);
+  }, []);
+
+  const handleSimulate = () => setState(p => simulateFault(p));
+
+  const openAnomalies = useMemo(() => (state.activeAnomalies || []).filter(a => a.status === 'OPEN'), [state.activeAnomalies]);
+  const criticalCount = openAnomalies.filter(a => a.severity === Severity.CRITICAL).length;
+  const warningCount = openAnomalies.filter(a => a.severity === Severity.WARNING).length;
+
+  const filtered = useMemo(() => {
+    let r = openAnomalies;
+    if (filter === 'fault') r = r.filter(a => a.issueType === 'FAULT');
+    if (filter === 'anomaly') r = r.filter(a => a.issueType === 'ANOMALY');
+    if (filter === 'critical') r = r.filter(a => a.severity === Severity.CRITICAL);
+    if (search) r = r.filter(a => a.description.toLowerCase().includes(search.toLowerCase()));
+    return r.sort((a, b) => a.severity === Severity.CRITICAL ? -1 : 1);
+  }, [openAnomalies, filter, search]);
+
+  return (
+    <div className="h-screen bg-slate-950 text-white font-sans flex flex-col overflow-hidden">
+      <header className="flex-none px-6 py-3 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-teal-600 rounded-xl flex items-center justify-center"><Hexagon size={24} /></div>
+          <div><h1 className="text-xl font-bold">CERNO <span className="text-slate-500 font-light">| Taunusturm</span></h1><p className="text-[10px] text-teal-500 uppercase tracking-widest">Anomalieerkennung</p></div>
+        </div>
+        <div className="flex items-center gap-4">
+          <button onClick={handleSimulate} className="flex items-center gap-2 px-4 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg text-sm font-medium transition-colors"><Play size={16} />Störung simulieren</button>
+          <div className="text-right"><p className="text-xl font-mono">{time.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</p><p className="text-[10px] text-slate-500">{time.toLocaleDateString('de-DE')}</p></div>
+          <div className="flex items-center gap-2 text-xs px-3 py-1 rounded-full bg-teal-900/30 border border-teal-800/50"><span className="w-2 h-2 bg-teal-500 rounded-full animate-pulse" />LIVE</div>
+        </div>
+      </header>
+
+      <div className="flex-none px-6 py-3 grid grid-cols-5 gap-4">
+        <KPICard icon={Building2} label="Etagen" value={state.floors?.length || 0} color="teal" />
+        <KPICard icon={AlertOctagon} label="Kritisch" value={criticalCount} color="red" pulse={criticalCount > 0} />
+        <KPICard icon={AlertTriangle} label="Warnungen" value={warningCount} color="amber" />
+        <KPICard icon={Wrench} label="Störungen" value={openAnomalies.filter(a => a.issueType === 'FAULT').length} color="orange" />
+        <KPICard icon={Settings} label="Wartung" value={maintenanceFloors.length} color="indigo" />
+      </div>
+
+      <div className="flex-1 flex overflow-hidden px-6 pb-6 gap-6">
+        <div className="flex-1 bg-slate-900/50 rounded-2xl border border-slate-800 overflow-hidden relative">
+          <Building3D floors={state.floors || []} anomalies={state.activeAnomalies || []} onSelectFloor={setSelectedFloor} selectedFloor={selectedFloor} maintenanceFloors={maintenanceFloors} />
+          <WeatherWidget data={weather} />
+        </div>
+
+        <div className="w-96 bg-slate-900/50 rounded-2xl border border-slate-800 flex flex-col">
+          <div className="p-4 border-b border-slate-800">
+            <h2 className="text-lg font-bold flex items-center gap-2"><Bell size={18} className="text-teal-500" />Ereignisübersicht</h2>
+            {selectedFloor && (
+              <div className="mt-3 p-3 bg-slate-800/50 rounded-lg flex items-center justify-between">
+                <div><p className="text-xs text-slate-500">Ausgewählt</p><p className="font-bold text-teal-400">{selectedFloor}</p></div>
+                <button onClick={() => toggleMaintenance(selectedFloor)} className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 ${maintenanceFloors.includes(selectedFloor) ? 'bg-indigo-600 text-white' : 'bg-slate-700 hover:bg-slate-600'}`}>
+                  {maintenanceFloors.includes(selectedFloor) ? <><PauseCircle size={14} />Wartung beenden</> : <><Settings size={14} />Wartungsmodus</>}
+                </button>
+              </div>
+            )}
+            <div className="relative mt-3"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Suchen..." className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-xs" /></div>
+            <div className="flex gap-2 mt-3">{['all', 'fault', 'anomaly', 'critical'].map(f => <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1 rounded-lg text-xs ${filter === f ? 'bg-teal-600' : 'bg-slate-800 hover:bg-slate-700'}`}>{f === 'all' ? 'Alle' : f === 'fault' ? 'Störungen' : f === 'anomaly' ? 'Anomalien' : 'Kritisch'}</button>)}</div>
+          </div>
+          <div className="flex-1 overflow-auto p-4 space-y-3">
+            {filtered.length === 0 ? <div className="text-center py-10 text-slate-500"><CheckCircle2 size={40} className="mx-auto mb-2 opacity-30" /><p className="text-sm">Alle Systeme nominal</p></div> : filtered.map(a => <AnomalyCard key={a.id} anomaly={a} onClick={() => setSelectedAnomaly(a)} />)}
+          </div>
+        </div>
+      </div>
+
+      <DetailModal anomaly={selectedAnomaly} onClose={() => setSelectedAnomaly(null)} onResolve={resolve} />
+      <ChatBot buildingState={state} />
+    </div>
+  );
+}
