@@ -290,51 +290,151 @@ const Building3D = ({ floors, anomalies, onSelectFloor, selectedFloor, maintenan
     const archLineMatLight = new THREE.LineBasicMaterial({ color: 0x667788, transparent: true, opacity: 0.4 });
     const archLineMatFaint = new THREE.LineBasicMaterial({ color: 0x445566, transparent: true, opacity: 0.25 });
 
-    // === MAIN TOWER (Architectural Blueprint Style) ===
+    // === MAIN TOWER (Architectural Blueprint Style with Sloped Roof) ===
     const totalFloors = 40;
     const towerHeight = totalFloors * floorH;
     const towerX = 0;
+    const slopeStartFloor = 32; // Where the slope begins
+    const slopeStartY = slopeStartFloor * floorH;
 
-    // Tower outer shell (transparent with edge lines)
-    const towerGeo = new THREE.BoxGeometry(towerW, towerHeight, towerD);
-    const towerMat = new THREE.MeshBasicMaterial({ color: 0x1a2535, transparent: true, opacity: 0.15 });
-    const towerShell = new THREE.Mesh(towerGeo, towerMat);
-    towerShell.position.set(towerX, towerHeight / 2, 0);
-    buildingGroup.add(towerShell);
+    // Create custom geometry for tower with sloped roof (left side slopes down)
+    const towerVertices = new Float32Array([
+      // Front face (z = towerD/2)
+      // Bottom-left, bottom-right, top-right (full height), top-left (sloped)
+      towerX - towerW/2, 0, towerD/2,                    // 0: front-bottom-left
+      towerX + towerW/2, 0, towerD/2,                    // 1: front-bottom-right
+      towerX + towerW/2, towerHeight, towerD/2,          // 2: front-top-right
+      towerX - towerW/2, slopeStartY, towerD/2,          // 3: front-top-left (sloped)
 
-    // Tower outer edges
-    const towerEdges = new THREE.EdgesGeometry(towerGeo);
-    const towerWire = new THREE.LineSegments(towerEdges, archLineMat);
-    towerWire.position.copy(towerShell.position);
-    buildingGroup.add(towerWire);
+      // Back face (z = -towerD/2)
+      towerX - towerW/2, 0, -towerD/2,                   // 4: back-bottom-left
+      towerX + towerW/2, 0, -towerD/2,                   // 5: back-bottom-right
+      towerX + towerW/2, towerHeight, -towerD/2,         // 6: back-top-right
+      towerX - towerW/2, slopeStartY, -towerD/2,         // 7: back-top-left (sloped)
+    ]);
 
-    // Draw horizontal floor lines (architectural style)
+    // Draw tower outline with lines (architectural style)
+    // Front face outline
+    const frontOutline = [
+      new THREE.Vector3(towerX - towerW/2, 0, towerD/2),
+      new THREE.Vector3(towerX + towerW/2, 0, towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, towerD/2),
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, towerD/2),  // Sloped top-left
+      new THREE.Vector3(towerX - towerW/2, 0, towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(frontOutline), archLineMat));
+
+    // Back face outline
+    const backOutline = [
+      new THREE.Vector3(towerX - towerW/2, 0, -towerD/2),
+      new THREE.Vector3(towerX + towerW/2, 0, -towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, -towerD/2),
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, -towerD/2),  // Sloped top-left
+      new THREE.Vector3(towerX - towerW/2, 0, -towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(backOutline), archLineMat));
+
+    // Left face outline (with slope)
+    const leftOutline = [
+      new THREE.Vector3(towerX - towerW/2, 0, -towerD/2),
+      new THREE.Vector3(towerX - towerW/2, 0, towerD/2),
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, towerD/2),
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, -towerD/2),
+      new THREE.Vector3(towerX - towerW/2, 0, -towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(leftOutline), archLineMat));
+
+    // Right face outline
+    const rightOutline = [
+      new THREE.Vector3(towerX + towerW/2, 0, -towerD/2),
+      new THREE.Vector3(towerX + towerW/2, 0, towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, -towerD/2),
+      new THREE.Vector3(towerX + towerW/2, 0, -towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(rightOutline), archLineMat));
+
+    // Sloped roof line (the diagonal)
+    const slopeLineFront = [
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(slopeLineFront), archLineMat));
+
+    const slopeLineBack = [
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, -towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, -towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(slopeLineBack), archLineMat));
+
+    // Top edge connecting front and back slopes
+    const topLeftEdge = [
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, -towerD/2),
+      new THREE.Vector3(towerX - towerW/2, slopeStartY, towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(topLeftEdge), archLineMat));
+
+    const topRightEdge = [
+      new THREE.Vector3(towerX + towerW/2, towerHeight, -towerD/2),
+      new THREE.Vector3(towerX + towerW/2, towerHeight, towerD/2),
+    ];
+    buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(topRightEdge), archLineMat));
+
+    // Semi-transparent fill for tower body (using simple box for the main part)
+    const mainBodyGeo = new THREE.BoxGeometry(towerW, slopeStartY, towerD);
+    const towerMat = new THREE.MeshBasicMaterial({ color: 0x1a2535, transparent: true, opacity: 0.12 });
+    const mainBody = new THREE.Mesh(mainBodyGeo, towerMat);
+    mainBody.position.set(towerX, slopeStartY / 2, 0);
+    buildingGroup.add(mainBody);
+
+    // Draw horizontal floor lines (architectural style) - accounting for slope
     for (let i = 0; i <= totalFloors; i++) {
       const y = i * floorH;
       const isTech = [5, 20, 39].includes(i);
       const lineMat = isTech ? archLineMat : (i % 5 === 0 ? archLineMatLight : archLineMatFaint);
 
-      // Front face floor line
-      const frontPts = [
-        new THREE.Vector3(towerX - towerW/2, y, towerD/2),
-        new THREE.Vector3(towerX + towerW/2, y, towerD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(frontPts), lineMat));
+      // Calculate left edge x position based on slope
+      let leftX = towerX - towerW/2;
+      if (i > slopeStartFloor) {
+        // Floor is above the slope start - line gets shorter on left side
+        const slopeProgress = (i - slopeStartFloor) / (totalFloors - slopeStartFloor);
+        leftX = towerX - towerW/2 + (towerW * slopeProgress);
+      }
 
-      // Left face floor line
-      const leftPts = [
-        new THREE.Vector3(towerX - towerW/2, y, -towerD/2),
-        new THREE.Vector3(towerX - towerW/2, y, towerD/2)
-      ];
-      buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(leftPts), lineMat));
+      // Only draw if floor is still within the building
+      if (i <= slopeStartFloor || leftX < towerX + towerW/2) {
+        // Front face floor line
+        const frontPts = [
+          new THREE.Vector3(leftX, y, towerD/2),
+          new THREE.Vector3(towerX + towerW/2, y, towerD/2)
+        ];
+        buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(frontPts), lineMat));
+
+        // Left face floor line (only below slope)
+        if (i <= slopeStartFloor) {
+          const leftPts = [
+            new THREE.Vector3(towerX - towerW/2, y, -towerD/2),
+            new THREE.Vector3(towerX - towerW/2, y, towerD/2)
+          ];
+          buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(leftPts), lineMat));
+        }
+      }
     }
 
     // Vertical structural lines on tower front
     const verticalPositions = [-towerW/2 + 0.8, -towerW/2 + 2.2, towerW/2 - 2.2, towerW/2 - 0.8];
-    verticalPositions.forEach(x => {
+    verticalPositions.forEach(xOffset => {
+      const x = towerX + xOffset;
+      // Calculate top y based on slope
+      let topY = towerHeight;
+      if (xOffset < 0) {
+        // Left side - affected by slope
+        const xProgress = (xOffset + towerW/2) / towerW;
+        topY = slopeStartY + (towerHeight - slopeStartY) * xProgress;
+      }
       const pts = [
-        new THREE.Vector3(towerX + x, 0, towerD/2 + 0.01),
-        new THREE.Vector3(towerX + x, towerHeight, towerD/2 + 0.01)
+        new THREE.Vector3(x, 0, towerD/2 + 0.01),
+        new THREE.Vector3(x, topY, towerD/2 + 0.01)
       ];
       buildingGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), archLineMatFaint));
     });
@@ -346,15 +446,27 @@ const Building3D = ({ floors, anomalies, onSelectFloor, selectedFloor, maintenan
       const h = floorH * 0.95;
       const isTechFloor = floor.type === FloorType.TECHNICAL;
 
+      // Calculate floor width based on slope
+      let floorWidth = towerW - 0.1;
+      let floorX = towerX;
+      if (floor.level > slopeStartFloor) {
+        const slopeProgress = (floor.level - slopeStartFloor) / (totalFloors - slopeStartFloor);
+        floorWidth = (towerW - 0.1) * (1 - slopeProgress);
+        floorX = towerX + (towerW * slopeProgress) / 2;
+      }
+
+      // Skip floors that are completely above the slope
+      if (floorWidth <= 0.5) return;
+
       // Thin plane for each floor (clickable area)
-      const geo = new THREE.BoxGeometry(towerW - 0.1, h, towerD - 0.1);
+      const geo = new THREE.BoxGeometry(floorWidth, h, towerD - 0.1);
       const mat = new THREE.MeshBasicMaterial({
         color: isTechFloor ? 0x1a1a2e : 0x1a2a3a,
         transparent: true,
         opacity: 0.01 // Nearly invisible by default
       });
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(towerX, y + h/2, 0);
+      mesh.position.set(floorX, y + h/2, 0);
       mesh.userData = { floorId: floor.id, floor, baseY: y + h/2, isTech: isTechFloor };
       buildingGroup.add(mesh);
       floorMeshesRef.current.push(mesh);
