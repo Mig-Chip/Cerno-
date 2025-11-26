@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Area, AreaChart, Legend, ComposedChart } from 'recharts';
-import { Hexagon, AlertTriangle, AlertOctagon, CheckCircle2, Activity, Zap, Flame, ArrowUpCircle, Fan, Droplets, Building2, Search, X, ChevronRight, Wrench, Bell, MessageSquare, Bot, Send, Play, PauseCircle, Settings, Sun, Cloud, Wind, Thermometer, Clock, Cpu, TrendingDown, TrendingUp, AlertCircle, FileText, History } from 'lucide-react';
+import { Hexagon, AlertTriangle, AlertOctagon, CheckCircle2, Activity, Zap, Flame, ArrowUpCircle, Fan, Droplets, Building2, Search, X, ChevronRight, Wrench, Bell, MessageSquare, Bot, Send, Play, PauseCircle, Settings, Sun, Cloud, Wind, Thermometer, Clock, Cpu, TrendingDown, TrendingUp, AlertCircle, FileText, History, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
 
 const SystemType = { CLIMATE_CEILING: 'Kühl-/Heizdecke', VENTILATION: 'Lüftung', PUMPS: 'Hydraulik/Pumpen', ELEVATOR: 'Aufzüge', POWER: 'Stromverbrauch', FIRE_ALARM: 'Brandmeldeanlage' };
 const Severity = { CRITICAL: 'Kritisch', WARNING: 'Warnung', NORMAL: 'Normal' };
@@ -891,27 +891,270 @@ const DetailModal = ({ anomaly, onClose, onResolve }) => {
 const ChatBot = ({ buildingState }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState([{ role: 'assistant', content: 'Hallo! Ich bin CERNO Assist. Frag mich zum Gebäudestatus.' }]);
+  const [messages, setMessages] = useState([{ role: 'assistant', content: 'Hallo! Ich bin CERNO Assist. Frag mich zum Gebäudestatus - per Text oder Sprache!' }]);
   const [loading, setLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const recognitionRef = React.useRef(null);
+  const messagesEndRef = React.useRef(null);
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
-    const msg = input.trim(); setInput(''); setMessages(p => [...p, { role: 'user', content: msg }]); setLoading(true);
+  // Scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Initialize Speech Recognition
+  useEffect(() => {
+    if (typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = true;
+      recognitionRef.current.lang = 'de-DE';
+
+      recognitionRef.current.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map(result => result[0].transcript)
+          .join('');
+        setInput(transcript);
+
+        // Auto-send when speech recognition is final
+        if (event.results[0].isFinal) {
+          setTimeout(() => {
+            setIsListening(false);
+          }, 500);
+        }
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsListening(false);
+      };
+    }
+  }, []);
+
+  // Text-to-Speech function
+  const speak = (text) => {
+    if (!voiceEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'de-DE';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    // Try to find a German voice
+    const voices = window.speechSynthesis.getVoices();
+    const germanVoice = voices.find(v => v.lang.startsWith('de')) || voices[0];
+    if (germanVoice) utterance.voice = germanVoice;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Toggle listening
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      alert('Spracherkennung wird in diesem Browser nicht unterstützt.');
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    } else {
+      setInput('');
+      recognitionRef.current.start();
+      setIsListening(true);
+    }
+  };
+
+  // Stop speaking
+  const stopSpeaking = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+  };
+
+  const sendMessage = async (messageText = null) => {
+    const msg = (messageText || input).trim();
+    if (!msg || loading) return;
+
+    setInput('');
+    setMessages(p => [...p, { role: 'user', content: msg }]);
+    setLoading(true);
+
     const openAnom = buildingState?.activeAnomalies?.filter(a => a.status === 'OPEN') || [];
     const ctx = `Gebäude: TaunusTurm, ${buildingState?.floors?.length || 45} Etagen. Aktive Ereignisse: ${openAnom.length}. ${openAnom.map(a => `${a.location}: ${a.description}`).join('; ')}`;
+
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 500, system: `Du bist CERNO Assist für Gebäudemanagement. Antworte kurz auf Deutsch. Kontext: ${ctx}`, messages: [{ role: 'user', content: msg }] }) });
-      const data = await res.json(); setMessages(p => [...p, { role: 'assistant', content: data.content?.[0]?.text || 'Fehler.' }]);
-    } catch { setMessages(p => [...p, { role: 'assistant', content: 'Verbindungsfehler.' }]); }
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 500,
+          system: `Du bist CERNO Assist, ein freundlicher KI-Assistent für Gebäudemanagement. Antworte kurz und prägnant auf Deutsch. Kontext: ${ctx}`,
+          messages: [{ role: 'user', content: msg }]
+        })
+      });
+      const data = await res.json();
+      const responseText = data.content?.[0]?.text || 'Entschuldigung, es gab einen Fehler.';
+      setMessages(p => [...p, { role: 'assistant', content: responseText }]);
+
+      // Speak the response if voice is enabled
+      if (voiceEnabled) {
+        speak(responseText);
+      }
+    } catch {
+      const errorMsg = 'Verbindungsfehler. Bitte versuche es erneut.';
+      setMessages(p => [...p, { role: 'assistant', content: errorMsg }]);
+      if (voiceEnabled) speak(errorMsg);
+    }
     setLoading(false);
   };
 
-  if (!isOpen) return <button onClick={() => setIsOpen(true)} className="fixed bottom-6 right-6 w-14 h-14 bg-teal-600 hover:bg-teal-500 rounded-2xl flex items-center justify-center shadow-lg z-50"><MessageSquare size={24} className="text-white" /></button>;
+  // Handle Enter key - send message
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  if (!isOpen) {
+    return (
+      <button
+        onClick={() => setIsOpen(true)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-teal-600 hover:bg-teal-500 rounded-2xl flex items-center justify-center shadow-lg z-50 transition-all hover:scale-105"
+      >
+        <MessageSquare size={24} className="text-white" />
+      </button>
+    );
+  }
+
   return (
-    <div className="fixed bottom-6 right-6 w-80 h-96 bg-slate-900/95 border border-slate-700 rounded-2xl flex flex-col z-50">
-      <div className="p-3 border-b border-slate-800 flex justify-between items-center"><div className="flex items-center gap-2"><Bot size={16} className="text-teal-400" /><span className="font-bold text-sm">CERNO Assist</span></div><button onClick={() => setIsOpen(false)}><X size={16} className="text-slate-400" /></button></div>
-      <div className="flex-1 overflow-auto p-3 space-y-2">{messages.map((m, i) => <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] rounded-xl px-3 py-2 text-xs ${m.role === 'user' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-200'}`}>{m.content}</div></div>)}{loading && <div className="text-xs text-slate-500">Tippt...</div>}</div>
-      <div className="p-3 border-t border-slate-800 flex gap-2"><input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} placeholder="Frage..." className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white" /><button onClick={sendMessage} className="p-2 bg-teal-600 rounded-lg"><Send size={14} /></button></div>
+    <div className="fixed bottom-6 right-6 w-96 h-[500px] bg-slate-900/95 border border-slate-700 rounded-2xl flex flex-col z-50 shadow-2xl">
+      {/* Header */}
+      <div className="p-3 border-b border-slate-800 flex justify-between items-center">
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Bot size={18} className="text-teal-400" />
+            {isSpeaking && (
+              <span className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            )}
+          </div>
+          <span className="font-bold text-sm">CERNO Voice Assist</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setVoiceEnabled(!voiceEnabled)}
+            className={`p-1.5 rounded-lg transition-colors ${voiceEnabled ? 'bg-teal-600/30 text-teal-400' : 'bg-slate-800 text-slate-500'}`}
+            title={voiceEnabled ? 'Sprachausgabe deaktivieren' : 'Sprachausgabe aktivieren'}
+          >
+            {voiceEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+          </button>
+          <button onClick={() => setIsOpen(false)} className="p-1.5 hover:bg-slate-800 rounded-lg">
+            <X size={16} className="text-slate-400" />
+          </button>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-auto p-3 space-y-3">
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[85%] rounded-xl px-3 py-2 text-xs ${
+              m.role === 'user'
+                ? 'bg-teal-700 text-white'
+                : 'bg-slate-800 text-slate-200'
+            }`}>
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="bg-slate-800 rounded-xl px-3 py-2 text-xs text-slate-400 flex items-center gap-2">
+              <span className="flex gap-1">
+                <span className="w-1.5 h-1.5 bg-teal-500 rounded-full animate-bounce" style={{animationDelay: '0ms'}} />
+                <span className="w-1.5 h-1.5 bg-teal-500 rounded-full animate-bounce" style={{animationDelay: '150ms'}} />
+                <span className="w-1.5 h-1.5 bg-teal-500 rounded-full animate-bounce" style={{animationDelay: '300ms'}} />
+              </span>
+              Denkt nach...
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Speaking indicator */}
+      {isSpeaking && (
+        <div className="px-3 py-2 bg-teal-900/30 border-t border-teal-800/30 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs text-teal-400">
+            <Volume2 size={14} className="animate-pulse" />
+            <span>Spricht...</span>
+          </div>
+          <button onClick={stopSpeaking} className="text-xs text-slate-400 hover:text-white">
+            Stopp
+          </button>
+        </div>
+      )}
+
+      {/* Input area */}
+      <div className="p-3 border-t border-slate-800">
+        {/* Voice recording indicator */}
+        {isListening && (
+          <div className="mb-2 p-2 bg-red-900/30 border border-red-800/50 rounded-lg flex items-center gap-2">
+            <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+            <span className="text-xs text-red-400">Höre zu... Sprich jetzt!</span>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={isListening ? 'Höre zu...' : 'Frage eingeben oder Mikrofon nutzen...'}
+            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-teal-600"
+            disabled={isListening}
+          />
+          <button
+            onClick={toggleListening}
+            className={`p-2 rounded-lg transition-all ${
+              isListening
+                ? 'bg-red-600 hover:bg-red-500 animate-pulse'
+                : 'bg-slate-700 hover:bg-slate-600'
+            }`}
+            title={isListening ? 'Aufnahme stoppen' : 'Spracheingabe starten'}
+          >
+            {isListening ? <MicOff size={16} className="text-white" /> : <Mic size={16} className="text-slate-300" />}
+          </button>
+          <button
+            onClick={() => sendMessage()}
+            disabled={!input.trim() || loading}
+            className="p-2 bg-teal-600 hover:bg-teal-500 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Send size={16} className="text-white" />
+          </button>
+        </div>
+
+        <p className="text-[10px] text-slate-600 mt-2 text-center">
+          Drücke das Mikrofon oder tippe deine Frage ein
+        </p>
+      </div>
     </div>
   );
 };
